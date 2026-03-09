@@ -8,7 +8,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/elements"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	mmdvm "github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
 func newTestTranslator(t *testing.T) *IPSCTranslator {

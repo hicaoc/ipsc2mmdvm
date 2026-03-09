@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
+	"github.com/hicaoc/ipsc2mmdvm/internal/config"
+	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
 	"github.com/vishvananda/netlink"
 )
 
@@ -65,6 +65,7 @@ const (
 	PacketType_PeerListReply         PacketType = 0x93
 	PacketType_MasterAliveRequest    PacketType = 0x96
 	PacketType_MasterAliveReply      PacketType = 0x97
+	PacketType_ControlF0             PacketType = 0xF0
 )
 
 var (
@@ -109,9 +110,9 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 }
 
 func (s *IPSCServer) Start() error {
-	if err := s.netlink(); err != nil {
-		return fmt.Errorf("error configuring network: %w", err)
-	}
+	// if err := s.netlink(); err != nil {
+	// 	return fmt.Errorf("error configuring network: %w", err)
+	// }
 
 	var err error
 	s.udp, err = net.ListenUDP("udp", &net.UDPAddr{
@@ -284,7 +285,7 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 		if err := s.handlePeerListRequest(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply:
+	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply, PacketType_ControlF0:
 		// These are reply packets, we shouldn't receive them as a server, keeping quiet.
 		return nil, ErrPacketIgnored
 	default:

@@ -13,8 +13,8 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	l3elements "github.com/USA-RedDragon/dmrgo/dmr/layer3/elements"
 	"github.com/USA-RedDragon/dmrgo/dmr/vocoder"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
+	mmdvm "github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
 // IPSCTranslator converts MMDVM DMRD packets into IPSC user packets.

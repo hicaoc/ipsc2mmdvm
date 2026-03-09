@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
+	"github.com/hicaoc/ipsc2mmdvm/internal/config"
 )
 
 func testConfig(authEnabled bool, authKey string) *config.Config {
@@ -422,6 +422,22 @@ func TestHandlePacketReplyTypesIgnored(t *testing.T) {
 	}
 }
 
+func TestHandlePacketControlF0Ignored(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(false, "")
+	s := NewIPSCServer(cfg, nil)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
+
+	data := make([]byte, 9)
+	data[0] = byte(PacketType_ControlF0)
+	binary.BigEndian.PutUint32(data[1:5], 0x004640CF)
+
+	_, err := s.handlePacket(data, addr)
+	if !errors.Is(err, ErrPacketIgnored) {
+		t.Fatalf("expected ErrPacketIgnored for type 0xF0, got %v", err)
+	}
+}
+
 func TestPacketTypeValues(t *testing.T) {
 	t.Parallel()
 	// Verify the packet type constants match the IPSC protocol
@@ -437,6 +453,7 @@ func TestPacketTypeValues(t *testing.T) {
 		PacketType_PeerListReply:         0x93,
 		PacketType_MasterAliveRequest:    0x96,
 		PacketType_MasterAliveReply:      0x97,
+		PacketType_ControlF0:             0xF0,
 	}
 	for pt, val := range expected {
 		if byte(pt) != val {
