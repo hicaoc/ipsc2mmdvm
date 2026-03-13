@@ -10,18 +10,60 @@ ipsc2mmdvm is a protocol bridge that translates between Motorola's IP Site Conne
 
 ```mermaid
 flowchart LR
-    A["Motorola<br>DMR Repeater"] <-->|"Ethernet<br>IPSC protocol<br>(direct cable)"| B
-    B["ipsc2mmdvm<br>(Raspberry Pi <br>or Linux box)"] <-->|"Internet<br>MMDVM protocol"| C[DMR Master 1<br>e.g. BrandMeister]
-    B <-->|"Internet<br>MMDVM protocol"| D[DMR Master 2<br>e.g. TGIF]
+    subgraph Devices["Local Devices"]
+        A["Motorola<br>DMR Repeater"]
+        H["Hytera<br>DMR Repeater"]
+        HA["Hytera<br>Analog Repeater"]
+        M["MMDVM<br>Hotspot / Box"]
+    end
+
+    subgraph Bridge["ipsc2mmdvm"]
+        IPSC["IPSC Server"]
+        HYT["Hytera Server"]
+        NRLBridge["NRL Bridge<br>u-law ↔ A-law"]
+        MS["MMDVM Server"]
+        MC["MMDVM Client"]
+        Router["Group Router<br>Static + Dynamic<br>Subscriptions"]
+        Rewrite["TG Rewrite<br>DMRGateway Rules"]
+        Bus["Device Bus"]
+        DB[("SQLite<br>Devices · Calls<br>Static Groups")]
+        Web["Web UI<br>WebSocket"]
+
+        IPSC --> Bus
+        HYT --> Bus
+        MS --> Bus
+        Bus --> Router
+        Router --> Rewrite
+        Rewrite --> MC
+        Rewrite --> MS
+        Rewrite --> HYT
+        Rewrite --> IPSC
+        Bus --> DB
+        DB --> Web
+    end
+
+    subgraph Upstream["Upstream Networks"]
+        BM["DMR Master 1<br>BrandMeister"]
+        TGIF["DMR Master 2<br>TGIF"]
+        NRL["NRL Server<br>Analog Interconnect"]
+    end
+
+    A <-->|"IPSC UDP"| IPSC
+    H <-->|"Hytera P2P UDP"| HYT
+    HA <-->|"Hytera Analog<br>u-law Voice"| NRLBridge
+    M <-->|"MMDVM UDP"| MS
+    MC <-->|"MMDVM UDP"| BM
+    MC <-->|"MMDVM UDP"| TGIF
+    NRLBridge <-->|"NRL2 UDP<br>G.711 A-law"| NRL
 ```
 
-Your repeater connects directly via Ethernet cable to the box running ipsc2mmdvm. The software acts as an IPSC master to the repeater and forwards voice and data traffic to and from one or more DMR masters over the internet. DMRGateway-style rewrite rules let you route specific talkgroups to specific masters.
+Motorola, Hytera and MMDVM devices connect to the box running ipsc2mmdvm. The software acts as an IPSC master for Motorola repeaters, a P2P peer for Hytera repeaters, and an MMDVM server for hotspot/box clients. Voice and data traffic is forwarded to and from one or more upstream DMR masters over the internet. Hytera analog repeaters can be bridged to NRL servers for analog interconnect. DMRGateway-style rewrite rules let you route specific talkgroups to specific masters.
 
 ## Requirements
 
-- A **Motorola IPSC-capable DMR repeater**
+- A **Motorola IPSC-capable DMR repeater**, **Hytera DMR repeater**, or **MMDVM hotspot/box** (one or more)
 - A **Raspberry Pi** (any model with Wi-Fi and an Ethernet port) or any **Linux box with a spare NIC**
-- An **Ethernet cable** to connect the repeater directly to the Pi/Linux box
+- An **Ethernet cable** to connect the repeater directly to the Pi/Linux box (Motorola/Hytera), or network access (MMDVM)
 - **Internet access** on the Pi/Linux box (via Wi-Fi on a Raspberry Pi, or a second NIC on a Linux box)
 - A **DMR Master** with a registered repeater ID to connect to (e.g. BrandMeister)
 
