@@ -5,14 +5,23 @@ import (
 	"testing"
 )
 
-// validConfig returns a minimal Config that passes all validation checks
-// that don't depend on OS state (netlink). Because Validate() calls
-// netlink.LinkByName we can only exercise the checks that run *before*
-// the interface lookup or the auth-key regex check.
+// validConfig returns a minimal Config that passes all validation checks.
 func validConfig() Config {
 	return Config{
 		LogLevel: LogLevelInfo,
-		MMDVM: []MMDVM{
+		Storage: Storage{
+			Path: "/tmp/ipsc2mmdvm-test.db",
+		},
+		Web: Web{
+			Enabled: true,
+			Address: ":9201",
+		},
+		Local: Local{
+			ID:        9000000,
+			Callsign:  "IPSC2MMDVM",
+			ColorCode: 1,
+		},
+		MMDVMClients: []MMDVM{
 			{
 				Name:         "BM",
 				Callsign:     "N0CALL",
@@ -25,13 +34,16 @@ func validConfig() Config {
 			},
 		},
 		IPSC: IPSC{
-			Interface:  "lo", // loopback exists on all Linux hosts
-			Port:       50000,
-			IP:         "10.10.250.1",
-			SubnetMask: 24,
+			Enabled: true,
+			Port:    50005,
 			Auth: IPSCAuth{
 				Enabled: false,
 			},
+		},
+		Hytera: Hytera{
+			Enabled: true,
+			P2PPort: 50000,
+			DMRPort: 50001,
 		},
 	}
 }
@@ -65,8 +77,7 @@ func TestValidateLogLevel(t *testing.T) {
 					t.Fatalf("expected %v, got %v", tt.wantErr, err)
 				}
 			}
-			// Valid levels may still fail on netlink lookup,
-			// so we only assert that the log-level error is NOT returned.
+			// For valid levels, only assert that log-level itself is accepted.
 			if !tt.hasError && errors.Is(err, ErrInvalidLogLevel) {
 				t.Fatalf("did not expect %v, got %v", ErrInvalidLogLevel, err)
 			}
@@ -74,10 +85,34 @@ func TestValidateLogLevel(t *testing.T) {
 	}
 }
 
+func TestValidateWithoutMMDVMNetworks(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.MMDVMClients = nil
+	c.MMDVMServers = nil
+	err := c.Validate()
+	if err != nil {
+		t.Fatalf("expected nil error without MMDVM networks, got %v", err)
+	}
+}
+
+func TestValidateMMDVMOnlyMode(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.IPSC.Enabled = false
+	c.Hytera.Enabled = false
+	c.Hytera.P2PPort = 0
+	c.Hytera.DMRPort = 0
+	err := c.Validate()
+	if err != nil {
+		t.Fatalf("expected nil error in mmdvm-only mode, got %v", err)
+	}
+}
+
 func TestValidateMMDVMCallsign(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.MMDVM[0].Callsign = ""
+	c.MMDVMClients[0].Callsign = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidMMDVMCallsign) {
 		t.Fatalf("expected %v, got %v", ErrInvalidMMDVMCallsign, err)
@@ -100,7 +135,7 @@ func TestValidateMMDVMColorCode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.MMDVM[0].ColorCode = tt.cc
+			c.MMDVMClients[0].ColorCode = tt.cc
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidMMDVMColorCode) {
 				t.Fatalf("expected %v, got %v", ErrInvalidMMDVMColorCode, err)
@@ -129,7 +164,7 @@ func TestValidateMMDVMLatitude(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.MMDVM[0].Latitude = tt.lat
+			c.MMDVMClients[0].Latitude = tt.lat
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidMMDVMLatitude) {
 				t.Fatalf("expected %v, got %v", ErrInvalidMMDVMLatitude, err)
@@ -158,7 +193,7 @@ func TestValidateMMDVMLongitude(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.MMDVM[0].Longitude = tt.lng
+			c.MMDVMClients[0].Longitude = tt.lng
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidMMDVMLongitude) {
 				t.Fatalf("expected %v, got %v", ErrInvalidMMDVMLongitude, err)
@@ -173,46 +208,95 @@ func TestValidateMMDVMLongitude(t *testing.T) {
 func TestValidateMMDVMMasterServer(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.MMDVM[0].MasterServer = ""
+	c.MMDVMClients[0].MasterServer = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidMMDVMMasterServer) {
 		t.Fatalf("expected %v, got %v", ErrInvalidMMDVMMasterServer, err)
 	}
 }
 
+func TestValidateMMDVMServerListen(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.MMDVMServers = []MMDVM{{
+		Name:      "HS",
+		Callsign:  "N0CALL",
+		ID:        67890,
+		ColorCode: 1,
+		Latitude:  30.0,
+		Longitude: -97.0,
+		Listen:    "bad-listen",
+		Password:  "password",
+	}}
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidMMDVMListen) {
+		t.Fatalf("expected %v, got %v", ErrInvalidMMDVMListen, err)
+	}
+}
+
+func TestValidateDuplicateMMDVMServerListen(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.MMDVMServers = []MMDVM{
+		{
+			Name:      "HS1",
+			Callsign:  "N0CALL",
+			ID:        67890,
+			ColorCode: 1,
+			Latitude:  30.0,
+			Longitude: -97.0,
+			Listen:    ":62031",
+			Password:  "password",
+		},
+		{
+			Name:      "HS2",
+			Callsign:  "N0CALL",
+			ID:        67891,
+			ColorCode: 1,
+			Latitude:  30.0,
+			Longitude: -97.0,
+			Listen:    ":62031",
+			Password:  "password",
+		},
+	}
+	err := c.Validate()
+	if !errors.Is(err, ErrDuplicateMMDVMListen) {
+		t.Fatalf("expected %v, got %v", ErrDuplicateMMDVMListen, err)
+	}
+}
+
 func TestValidateMMDVMPassword(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.MMDVM[0].Password = ""
+	c.MMDVMClients[0].Password = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidMMDVMPassword) {
 		t.Fatalf("expected %v, got %v", ErrInvalidMMDVMPassword, err)
 	}
 }
 
-func TestValidateIPSCInterface(t *testing.T) {
+func TestValidateIPSCInterfaceIgnored(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
 	c.IPSC.Interface = ""
 	err := c.Validate()
-	if !errors.Is(err, ErrInvalidIPSCInterface) {
-		t.Fatalf("expected %v, got %v", ErrInvalidIPSCInterface, err)
+	if errors.Is(err, ErrInvalidIPSCInterface) {
+		t.Fatalf("did not expect %v", ErrInvalidIPSCInterface)
 	}
 }
 
-func TestValidateIPSCSubnetMask(t *testing.T) {
+func TestValidateIPSCSubnetMaskIgnored(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		mask    int
-		wantErr bool
+		name string
+		mask int
 	}{
-		{"valid 1", 1, false},
-		{"valid 24", 24, false},
-		{"valid 32", 32, false},
-		{"invalid 0", 0, true},
-		{"invalid 33", 33, true},
-		{"invalid -1", -1, true},
+		{"valid 1", 1},
+		{"valid 24", 24},
+		{"valid 32", 32},
+		{"invalid 0", 0},
+		{"invalid 33", 33},
+		{"invalid -1", -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,10 +304,7 @@ func TestValidateIPSCSubnetMask(t *testing.T) {
 			c := validConfig()
 			c.IPSC.SubnetMask = tt.mask
 			err := c.Validate()
-			if tt.wantErr && !errors.Is(err, ErrInvalidIPSCSubnetMask) {
-				t.Fatalf("expected %v, got %v", ErrInvalidIPSCSubnetMask, err)
-			}
-			if !tt.wantErr && errors.Is(err, ErrInvalidIPSCSubnetMask) {
+			if errors.Is(err, ErrInvalidIPSCSubnetMask) {
 				t.Fatalf("did not expect %v", ErrInvalidIPSCSubnetMask)
 			}
 		})
@@ -264,6 +345,37 @@ func TestValidateIPSCAuthKeyValid(t *testing.T) {
 	}
 }
 
+func TestValidateHyteraDMRPort(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Hytera.DMRPort = 0
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidIPSCDMRPort) {
+		t.Fatalf("expected %v, got %v", ErrInvalidIPSCDMRPort, err)
+	}
+}
+
+func TestValidateHyteraP2PPort(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Hytera.P2PPort = 0
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidHyteraP2PPort) {
+		t.Fatalf("expected %v, got %v", ErrInvalidHyteraP2PPort, err)
+	}
+}
+
+func TestValidateBothPortConflict(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.IPSC.Port = 50000
+	c.Hytera.P2PPort = 50000
+	err := c.Validate()
+	if !errors.Is(err, ErrIPSCPortConflict) {
+		t.Fatalf("expected %v, got %v", ErrIPSCPortConflict, err)
+	}
+}
+
 func TestLogLevelConstants(t *testing.T) {
 	t.Parallel()
 	if LogLevelDebug != "debug" {
@@ -298,6 +410,7 @@ func TestValidateMetricsAddress(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
+			c.Metrics.Enabled = true
 			c.Metrics.Address = tt.addr
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidMetricsAddress) {
@@ -307,5 +420,45 @@ func TestValidateMetricsAddress(t *testing.T) {
 				t.Fatalf("did not expect %v, got %v", ErrInvalidMetricsAddress, err)
 			}
 		})
+	}
+}
+
+func TestValidateStoragePath(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Storage.Path = ""
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidStoragePath) {
+		t.Fatalf("expected %v, got %v", ErrInvalidStoragePath, err)
+	}
+}
+
+func TestValidateWebAddress(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Web.Address = "bad-web-address"
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidWebAddress) {
+		t.Fatalf("expected %v, got %v", ErrInvalidWebAddress, err)
+	}
+}
+
+func TestValidateLocalBridgeID(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Local.ID = 0
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidLocalID) {
+		t.Fatalf("expected %v, got %v", ErrInvalidLocalID, err)
+	}
+}
+
+func TestValidateLocalBridgeColorCode(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Local.ColorCode = 16
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidLocalColorCode) {
+		t.Fatalf("expected %v, got %v", ErrInvalidLocalColorCode, err)
 	}
 }

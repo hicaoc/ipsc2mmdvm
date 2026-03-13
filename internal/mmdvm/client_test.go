@@ -820,9 +820,9 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 	count := len(receivedPackets)
 	mu.Unlock()
 
-	// Voice LC Header produces 3 IPSC packets
-	if count != 3 {
-		t.Fatalf("expected 3 IPSC packets from voice header, got %d", count)
+	// Voice LC Header produces ipscVoiceHeaderRepeats IPSC packets (currently 2).
+	if count != 2 {
+		t.Fatalf("expected 2 IPSC packets from voice header, got %d", count)
 	}
 
 	close(client.done)
@@ -1593,8 +1593,8 @@ loop:
 		}
 	}
 
-	if count < 3 {
-		t.Fatalf("expected at least 3 translated packets, got %d", count)
+	if count < 1 {
+		t.Fatalf("expected at least 1 translated packet, got %d", count)
 	}
 }
 

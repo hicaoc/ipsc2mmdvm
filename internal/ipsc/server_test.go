@@ -16,7 +16,7 @@ import (
 
 func testConfig(authEnabled bool, authKey string) *config.Config {
 	return &config.Config{
-		MMDVM: []config.MMDVM{{
+		MMDVMClients: []config.MMDVM{{
 			ID: 311860,
 		}},
 		IPSC: config.IPSC{
@@ -199,8 +199,8 @@ func TestNewIPSCServerNoAuth(t *testing.T) {
 	if s.authKey != nil {
 		t.Fatal("expected nil auth key when auth disabled")
 	}
-	if s.localID != cfg.MMDVM[0].ID {
-		t.Fatalf("expected localID %d, got %d", cfg.MMDVM[0].ID, s.localID)
+	if s.localID != cfg.MMDVMClients[0].ID {
+		t.Fatalf("expected localID %d, got %d", cfg.MMDVMClients[0].ID, s.localID)
 	}
 }
 
@@ -270,8 +270,8 @@ func TestBuildMasterRegisterReply(t *testing.T) {
 	}
 
 	id := binary.BigEndian.Uint32(reply[1:5])
-	if id != cfg.MMDVM[0].ID {
-		t.Fatalf("expected ID %d, got %d", cfg.MMDVM[0].ID, id)
+	if id != cfg.MMDVMClients[0].ID {
+		t.Fatalf("expected ID %d, got %d", cfg.MMDVMClients[0].ID, id)
 	}
 }
 
@@ -1543,20 +1543,6 @@ func TestFullRegistrationFlow(t *testing.T) {
 	}
 	if peer.Mode != 0x6A {
 		t.Fatalf("expected mode 0x6A, got 0x%02X", peer.Mode)
-	}
-}
-
-// --- netlink error test ---
-
-func TestNetlinkFailsBadInterface(t *testing.T) {
-	t.Parallel()
-	cfg := testConfig(false, "")
-	cfg.IPSC.Interface = "nonexistent_iface_xyz"
-	s := NewIPSCServer(cfg, nil)
-
-	err := s.netlink()
-	if err == nil {
-		t.Fatal("expected netlink error for nonexistent interface")
 	}
 }
 

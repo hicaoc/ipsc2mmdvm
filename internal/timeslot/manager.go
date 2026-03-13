@@ -63,6 +63,14 @@ func NewManager() *Manager {
 	}
 }
 
+// SetTimeout configures the active-call timeout used for slot reclaim.
+func (m *Manager) SetTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	m.timeout = timeout
+}
+
 // SetMetrics configures the metrics collector and direction label for this manager.
 func (m *Manager) SetMetrics(met *metrics.Metrics, direction string) {
 	m.metrics = met

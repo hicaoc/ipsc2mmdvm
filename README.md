@@ -2,9 +2,9 @@
 
 [![Release](https://github.com/hicaoc/ipsc2mmdvm/actions/workflows/release.yaml/badge.svg)](https://github.com/hicaoc/ipsc2mmdvm/actions/workflows/release.yaml) [![go.mod version](https://img.shields.io/github/go-mod/go-version/hicaoc/ipsc2mmdvm.svg)](https://github.com/hicaoc/ipsc2mmdvm) [![GoReportCard](https://goreportcard.com/badge/github.com/hicaoc/ipsc2mmdvm)](https://goreportcard.com/report/github.com/hicaoc/ipsc2mmdvm) [![License](https://badgen.net/github/license/hicaoc/ipsc2mmdvm)](https://github.com/hicaoc/ipsc2mmdvm/blob/main/LICENSE) [![Release](https://img.shields.io/github/release/hicaoc/ipsc2mmdvm.svg)](https://github.com/hicaoc/ipsc2mmdvm/releases/) [![codecov](https://codecov.io/gh/hicaoc/ipsc2mmdvm/graph/badge.svg?token=NHCyRaZGG9)](https://codecov.io/gh/hicaoc/ipsc2mmdvm)
 
-**Connect your Motorola IPSC repeater to MMDVM DMR Masters.**
+**Connect Motorola/Hytera repeaters and MMDVM devices through one bridge.**
 
-ipsc2mmdvm is a protocol bridge that translates between Motorola's IP Site Connect (IPSC) protocol and the MMDVM Protocol. This lets your IPSC-only repeater talk to one or more DMR masters such as BrandMeister and TGIF simultaneously, with [DMRGateway](https://github.com/g4klx/DMRGateway)-compatible rewrite rules for routing talkgroups between networks.
+ipsc2mmdvm is a protocol bridge that translates between Motorola's IP Site Connect (IPSC), Hytera traffic, and the MMDVM Protocol. It can connect to upstream MMDVM masters such as BrandMeister/TGIF, accept inbound self-registering MMDVM hotspot clients, persist device metadata to SQLite, and expose a real-time web UI for online devices and recent call history.
 
 ## How It Works
 
@@ -50,23 +50,41 @@ Here is the full example config with comments:
 
 ```yaml
 log-level: info
+display-ip: "10.10.250.1"    # shared display IP in web runtime info (IPSC + Hytera)
 
 ipsc:
-  interface: "eth0"       # The network interface connected to your repeater
+  enabled: true
   port: 50000             # UDP port the repeater will connect to
-  ip: "10.10.250.1"       # IP address assigned to the interface (must match repeater's Gateway IP)
-  subnet-mask: 24         # Subnet mask (24 = 255.255.255.0)
   auth:
     enabled: false        # Set to true if you configured an auth key in CPS
     key: ""               # Hex string, up to 40 characters (must match CPS)
+
+hytera:
+  enabled: true
+  p2p-port: 50001
+  dmr-port: 30001
+  rdac-port: 30002
+  enable-rdac: false
 
 metrics:
   enabled: false          # Enable Prometheus metrics endpoint
   address: ":9100"        # Address to serve metrics on (e.g. ":9100" for all interfaces)
 
-mmdvm:
+storage:
+  path: "ipsc2mmdvm.db"   # SQLite database for devices and call history
+
+web:
+  enabled: true
+  address: ":9201"        # Web UI and WebSocket endpoint
+
+local:
+  id: 9000000             # Local bridge identity, independent from any external device
+  callsign: "IPSC2MMDVM"
+  color-code: 1
+
+mmdvm-client:
   - name: "BrandMeister"  # Friendly name for logging
-    master-server: "3104.master.brandmeister.network:62031"  # BrandMeister master (see below)
+    master-server: "3104.master.brandmeister.network:62031"  # BrandMeister master
     password: "passw0rd"  # Your BrandMeister hotspot password
 
     callsign: N0CALL      # Your callsign
@@ -110,18 +128,32 @@ mmdvm:
   #       to-slot: 2
   #       to-tg: 31665
   #       range: 1
+  #
+mmdvm-server:
+  # - name: "LocalHotspot"
+  #   listen: ":62031"  # default inbound MMDVM client port
+  #   password: "secret"
+  #   # Clients register their own callsign / DMRID / model at runtime.
+  #   pass-all-tg: [1, 2]
 ```
 
 **Config notes:**
 
-- **`ipsc.interface`** - The name of the network interface physically connected to your repeater. On a Raspberry Pi this is typically `eth0`. Run `ip link` to see your interface names.
-- **`ipsc.ip`** - The IP address ipsc2mmdvm assigns to that interface. This becomes the "Master IP" in your repeater's CPS config, and also the gateway for the repeater. Pick any private IP (e.g. `10.10.250.1`).
+- **`ipsc.enabled` / `hytera.enabled`** - Set to `false` to run only the MMDVM side. In that mode the program can still connect to BM/TGIF and maintain session state by itself.
+- **Listener bind address** - IPSC/Hytera listeners bind on `0.0.0.0` (all local addresses). Use the host IP that your repeater can reach as CPS "Master IP/Gateway IP".
+- **`display-ip`** - Shared runtime display IP used by both IPSC and Hytera in web "System Info". Does not affect actual bind address.
 - **`ipsc.port`** - The UDP port to listen on. The default `50000` works fine. Must match the "Master UDP Port" in CPS.
-- **`mmdvm`** - A YAML array of DMR master connections. Each entry is a separate master. You can connect to as many masters as you like.
-- **`mmdvm[].name`** - A friendly name for this network, used in log messages (e.g. `"BrandMeister"`, `"TGIF"`).
-- **`mmdvm[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62030`).
-- **`mmdvm[].password`** - Your hotspot security password, such as the one set in your BrandMeister self-care dashboard.
-- **`mmdvm[].radio-id`** - Your repeater's DMR ID, registered at [radioid.net](https://radioid.net/).
+- **`mmdvm-client[].name`** - A friendly name for an outbound MMDVM network, used in log messages (e.g. `"BrandMeister"`, `"TGIF"`).
+- **`mmdvm-server[].name`** - A friendly name for an inbound MMDVM listener, used in log messages.
+- **`mmdvm-client`** - Outbound MMDVM master connections such as BrandMeister or TGIF.
+- **`mmdvm-client[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62030`).
+- **`mmdvm-server`** - Inbound listeners that accept MMDVM hotspot/box clients.
+- **`mmdvm-server[].listen`** - UDP listen address used by the local MMDVM server. Default is `:62031`. Connected boxes self-register into SQLite automatically.
+- **`mmdvm-client[].password` / `mmdvm-server[].password`** - Shared password used for the MMDVM protocol handshake.
+- **`mmdvm-client[].radio-id`** - Your outbound repeater/hotspot DMR ID, registered at [radioid.net](https://radioid.net/).
+- **`storage.path`** - SQLite file used for the unified device inventory and call history.
+- **`web.address`** - Web management UI address. Open `http://host:9201/` after startup.
+- **`local.id`** - Local bridge DMR ID used when Moto/Hytera/MMDVM traffic is synthesized or forwarded without depending on any single external device.
 
 ### 3. Configure the Motorola Repeater (CPS)
 
@@ -134,16 +166,16 @@ Open your repeater's codeplug in the **Motorola Customer Programming Software (C
 |       Setting       |                              Value                               |
 | ------------------- | ---------------------------------------------------------------- |
 | **DHCP**            | **Disabled**                                                     |
-| **Ethernet IP**     | A static IP on the same subnet as `ipsc.ip` (e.g. `10.10.250.2`) |
-| **Gateway IP**      | The `ipsc.ip` value from your config (e.g. `10.10.250.1`)        |
-| **Gateway Netmask** | Matching your `subnet-mask` (e.g. `255.255.255.0` for `/24`)     |
+| **Ethernet IP**     | A static IP on the same subnet as your server IP (e.g. `10.10.250.2`) |
+| **Gateway IP**      | Your server IP (the host running ipsc2mmdvm)                          |
+| **Gateway Netmask** | Use the same subnet mask as the repeater Ethernet IP             |
 
 #### Link Establishment
 
 |        Setting         |                                                              Value                                                              |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | **Link Type**          | **Peer**                                                                                                                        |
-| **Master IP**          | The `ipsc.ip` value from your config (e.g. `10.10.250.1`)                                                                       |
+| **Master IP**          | Your server IP (the host running ipsc2mmdvm, e.g. `10.10.250.1`)                                                                |
 | **Master UDP Port**    | The `ipsc.port` value from your config (e.g. `50000`)                                                                           |
 | **Authentication Key** | *(Optional)* Up to 40 hex characters. If set, enable `ipsc.auth.enabled` and put the same key in `ipsc.auth.key` in the config. |
 
@@ -171,6 +203,15 @@ cd /etc && sudo ipsc2mmdvm
 ```
 
 On startup you should see the repeater register and traffic will begin flowing to BrandMeister.
+
+### Web UI
+
+When `web.enabled` is true, open `http://<server>:9201/` to view:
+
+- online Moto repeater / Hytera repeater / MMDVM box inventory
+- current IP / port, callsign, DMRID, model and saved notes
+- recent 50 calls in real time through WebSocket
+- historical calls loaded from SQLite on page load
 
 ### Running as a systemd Service
 
@@ -224,10 +265,8 @@ All settings can also be set via **environment variables** using `_` as a separa
 
 |       Setting       |  Type  |    Default    |                 Description                 |
 | ------------------- | ------ | ------------- | ------------------------------------------- |
-| `ipsc.interface`    | string | -             | Network interface connected to the repeater |
+| `display-ip`        | string | -             | Shared display IP for IPSC/Hytera runtime info |
 | `ipsc.port`         | uint16 | -             | UDP listen port                             |
-| `ipsc.ip`           | string | `10.10.250.1` | IP address to assign to the interface       |
-| `ipsc.subnet-mask`  | int    | `24`          | CIDR subnet mask (1–32)                     |
 | `ipsc.auth.enabled` | bool   | `false`       | Enable IPSC authentication                  |
 | `ipsc.auth.key`     | string | -             | Hex authentication key (up to 40 chars)     |
 

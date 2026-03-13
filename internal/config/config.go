@@ -4,8 +4,7 @@ import (
 	"errors"
 	"net"
 	"regexp"
-
-	"github.com/vishvananda/netlink"
+	"strings"
 )
 
 type LogLevel string
@@ -18,10 +17,21 @@ const (
 )
 
 type Config struct {
-	LogLevel LogLevel `name:"log-level" description:"Logging level for the application. One of debug, info, warn, or error" default:"info"`
-	Metrics  Metrics  `name:"metrics" description:"Configuration for Prometheus metrics"`
-	MMDVM    []MMDVM  `name:"mmdvm" description:"Configuration for MMDVM clients (multiple DMR masters)"`
-	IPSC     IPSC     `name:"ipsc" description:"Configuration for the IPSC server"`
+	LogLevel     LogLevel `name:"log-level" description:"Logging level for the application. One of debug, info, warn, or error" default:"info"`
+	DisplayIP    string   `name:"display-ip" description:"Shared display IP for IPSC/Hytera runtime info in web UI"`
+	Metrics      Metrics  `name:"metrics" description:"Configuration for Prometheus metrics"`
+	DMRIDDB      DMRIDDB  `name:"dmrid-db" description:"Optional local DMR ID to callsign database loaded at startup"`
+	Storage      Storage  `name:"storage" description:"Persistent storage configuration"`
+	Web          Web      `name:"web" description:"Web management UI configuration"`
+	Local        Local    `name:"local" description:"Local bridge identity used when forwarding between protocols"`
+	MMDVMClients []MMDVM  `name:"mmdvm-client" description:"Configuration for outbound MMDVM client connections (multiple DMR masters)"`
+	MMDVMServers []MMDVM  `name:"mmdvm-server" description:"Configuration for inbound MMDVM servers that accept hotspot/client connections"`
+	IPSC         IPSC     `name:"ipsc" description:"Configuration for the IPSC server"`
+	Hytera       Hytera   `name:"hytera" description:"Configuration for the Hytera frontend"`
+}
+
+type DMRIDDB struct {
+	Path string `name:"path" description:"Path to the DMR ID CSV/TXT file used to resolve callsigns" default:""`
 }
 
 type Metrics struct {
@@ -29,13 +39,46 @@ type Metrics struct {
 	Address string `name:"address" description:"Address to serve Prometheus metrics on" default:":9100"`
 }
 
-// IPSC creates a virtual network interface and listens for IPSC packets on it.
+type Storage struct {
+	Path string `name:"path" description:"Path to the SQLite database file" default:"ipsc2mmdvm.db"`
+}
+
+type Web struct {
+	Enabled        bool              `name:"enabled" description:"Whether to enable the web management UI" default:"true"`
+	Address        string            `name:"address" description:"Address to serve the web management UI on" default:":9201"`
+	SessionSecret  string            `name:"session-secret" description:"Secret used to sign web sessions"`
+	BootstrapAdmin WebBootstrapAdmin `name:"bootstrap-admin" description:"Optional initial administrator account"`
+}
+
+type WebBootstrapAdmin struct {
+	Username string `name:"username" description:"Initial administrator username"`
+	Callsign string `name:"callsign" description:"Initial administrator callsign"`
+	Email    string `name:"email" description:"Initial administrator email"`
+	Password string `name:"password" description:"Initial administrator password"`
+}
+
+type Local struct {
+	ID        uint32 `name:"id" description:"Local bridge DMR ID used when synthesizing packets without an upstream MMDVM identity" default:"9000000"`
+	Callsign  string `name:"callsign" description:"Local bridge callsign or display name" default:"IPSC2MMDVM"`
+	ColorCode uint8  `name:"color-code" description:"Default color code for synthesized local bridge traffic" default:"1"`
+}
+
+// IPSC listens for repeater UDP packets on IP:port.
 type IPSC struct {
-	Interface  string   `name:"interface" description:"Interface to listen for IPSC packets on"`
-	Port       uint16   `name:"port" description:"Port to listen for IPSC packets on"`
-	IP         string   `name:"ip" description:"IP address to listen for IPSC packets on" default:"10.10.250.1"`
-	SubnetMask int      `name:"subnet-mask" description:"Subnet mask for the virtual network interface created for IPSC packets" default:"24"`
-	Auth       IPSCAuth `name:"auth" description:"Authentication configuration for the IPSC server"`
+	Enabled    bool     `name:"enabled" description:"Enable Motorola IPSC frontend" default:"true"`
+	Interface  string   `name:"interface" description:"Deprecated: no longer used"`
+	Port       uint16   `name:"port" description:"Port to listen for moto IPSC packets on"`
+	IP         string   `name:"ip" description:"Optional display IP shown in web runtime info"`
+	SubnetMask int      `name:"subnet-mask" description:"Deprecated: no longer used" default:"24"`
+	Auth       IPSCAuth `name:"auth" description:"Authentication configuration for moto IPSC packets"`
+}
+
+type Hytera struct {
+	Enabled    bool   `name:"enabled" description:"Enable Hytera frontend" default:"true"`
+	P2PPort    uint16 `name:"p2p-port" description:"Hytera P2P registration/control port" default:"50001"`
+	DMRPort    uint16 `name:"dmr-port" description:"Hytera DMR traffic port" default:"30001"`
+	RDACPort   uint16 `name:"rdac-port" description:"Hytera RDAC traffic port" default:"30002"`
+	EnableRDAC bool   `name:"enable-rdac" description:"Enable Hytera RDAC listener" default:"false"`
 }
 
 type IPSCAuth struct {
@@ -66,6 +109,7 @@ type MMDVM struct {
 	URL          string `name:"url" description:"URL for the MMDVM connection"`
 	Slots        byte   `name:"slots" description:"Active timeslots bitmask (1=TS1, 2=TS2, 3=both)" default:"3"`
 	MasterServer string `name:"master-server" description:"Master server for the MMDVM connection"`
+	Listen       string `name:"listen" description:"UDP listen address for server mode" default:":62031"`
 	Password     string `name:"password" description:"Password for the MMDVM connection"`
 
 	// Rewrite rules for routing DMR data to/from this network.
@@ -120,7 +164,6 @@ type SrcRewriteConfig struct {
 
 var (
 	ErrInvalidLogLevel          = errors.New("invalid log level provided")
-	ErrNoMMDVMNetworks          = errors.New("at least one MMDVM network must be configured")
 	ErrInvalidMMDVMName         = errors.New("invalid MMDVM network name provided")
 	ErrDuplicateMMDVMName       = errors.New("duplicate MMDVM network name provided")
 	ErrInvalidMMDVMCallsign     = errors.New("invalid MMDVM callsign provided")
@@ -128,14 +171,22 @@ var (
 	ErrInvalidMMDVMLongitude    = errors.New("invalid MMDVM longitude provided")
 	ErrInvalidMMDVMLatitude     = errors.New("invalid MMDVM latitude provided")
 	ErrInvalidMMDVMMasterServer = errors.New("invalid MMDVM master server provided")
+	ErrInvalidMMDVMListen       = errors.New("invalid MMDVM listen address provided")
+	ErrDuplicateMMDVMListen     = errors.New("duplicate MMDVM listen address provided")
 	ErrInvalidMMDVMPassword     = errors.New("invalid MMDVM password provided")
 	ErrInvalidRewriteSlot       = errors.New("invalid rewrite slot (must be 1 or 2)")
 	ErrInvalidRewriteRange      = errors.New("invalid rewrite range (must be >= 1)")
 	ErrInvalidIPSCInterface     = errors.New("invalid IPSC interface provided")
-	ErrInvalidIPSCIP            = errors.New("invalid IPSC IP address provided")
 	ErrInvalidIPSCSubnetMask    = errors.New("invalid IPSC subnet mask provided")
+	ErrInvalidHyteraP2PPort     = errors.New("invalid Hytera P2P port provided")
+	ErrInvalidIPSCDMRPort       = errors.New("invalid Hytera DMR port provided")
+	ErrIPSCPortConflict         = errors.New("IPSC moto port conflicts with Hytera P2P port")
 	ErrInvalidIPSCAuthKey       = errors.New("invalid IPSC authentication key provided")
 	ErrInvalidMetricsAddress    = errors.New("invalid metrics address provided")
+	ErrInvalidStoragePath       = errors.New("invalid storage path provided")
+	ErrInvalidWebAddress        = errors.New("invalid web address provided")
+	ErrInvalidLocalID           = errors.New("invalid local bridge ID provided")
+	ErrInvalidLocalColorCode    = errors.New("invalid local bridge color code provided")
 )
 
 func (c Config) Validate() error {
@@ -151,86 +202,146 @@ func (c Config) Validate() error {
 			return ErrInvalidMetricsAddress
 		}
 	}
-
-	if len(c.MMDVM) == 0 {
-		return ErrNoMMDVMNetworks
+	if c.Storage.Path == "" {
+		return ErrInvalidStoragePath
+	}
+	if c.Web.Enabled && c.Web.Address != "" {
+		_, _, err := net.SplitHostPort(c.Web.Address)
+		if err != nil {
+			return ErrInvalidWebAddress
+		}
+	}
+	if c.Local.ID == 0 {
+		return ErrInvalidLocalID
+	}
+	if c.Local.ColorCode > 15 {
+		return ErrInvalidLocalColorCode
 	}
 
-	names := make(map[string]struct{}, len(c.MMDVM))
-	for i := range c.MMDVM {
-		h := &c.MMDVM[i]
+	names := make(map[string]struct{}, len(c.MMDVMClients)+len(c.MMDVMServers))
+	listeners := map[string]struct{}{}
+	if err := validateMMDVMNetworks(c.MMDVMClients, true, true, names, listeners); err != nil {
+		return err
+	}
+	if err := validateMMDVMNetworks(c.MMDVMServers, false, false, names, listeners); err != nil {
+		return err
+	}
 
-		// Default name to "Network N" if empty
-		if h.Name == "" {
-			return ErrInvalidMMDVMName
+	if c.IPSC.Enabled || c.Hytera.Enabled {
+		// Listeners bind to all local addresses (0.0.0.0).
+	}
+
+	if c.IPSC.Enabled {
+
+		if c.IPSC.Auth.Enabled && c.IPSC.Auth.Key == "" {
+			return ErrInvalidIPSCAuthKey
 		}
 
-		if _, ok := names[h.Name]; ok {
-			return ErrDuplicateMMDVMName
-		}
-		names[h.Name] = struct{}{}
-
-		if h.Callsign == "" {
-			return ErrInvalidMMDVMCallsign
-		}
-
-		if h.ColorCode > 15 {
-			return ErrInvalidMMDVMColorCode
-		}
-
-		if h.Longitude < -180 || h.Longitude > 180 {
-			return ErrInvalidMMDVMLongitude
-		}
-
-		if h.Latitude < -90 || h.Latitude > 90 {
-			return ErrInvalidMMDVMLatitude
-		}
-
-		if h.MasterServer == "" {
-			return ErrInvalidMMDVMMasterServer
-		}
-
-		if h.Password == "" {
-			return ErrInvalidMMDVMPassword
-		}
-
-		if err := validateRewrites(h); err != nil {
-			return err
+		regexp := regexp.MustCompile(`^[0-9a-fA-F]{0,40}$`)
+		if !regexp.MatchString(c.IPSC.Auth.Key) {
+			return ErrInvalidIPSCAuthKey
 		}
 	}
 
-	if c.IPSC.Interface == "" {
-		return ErrInvalidIPSCInterface
+	if c.Hytera.Enabled {
+		if c.Hytera.P2PPort == 0 {
+			return ErrInvalidHyteraP2PPort
+		}
+		if c.Hytera.DMRPort == 0 {
+			return ErrInvalidIPSCDMRPort
+		}
 	}
 
-	_, err := netlink.LinkByName(c.IPSC.Interface)
-	if err != nil {
-		return ErrInvalidIPSCInterface
-	}
-
-	if c.IPSC.IP == "" {
-		return ErrInvalidIPSCIP
-	}
-
-	if c.IPSC.SubnetMask < 1 || c.IPSC.SubnetMask > 32 {
-		return ErrInvalidIPSCSubnetMask
-	}
-
-	if c.IPSC.Auth.Enabled && c.IPSC.Auth.Key == "" {
-		return ErrInvalidIPSCAuthKey
-	}
-
-	// Check authkey is [0-9a-fA-F]{0,40} if c.IPSC.Auth.Enabled {
-	regexp := regexp.MustCompile(`^[0-9a-fA-F]{0,40}$`)
-	if !regexp.MatchString(c.IPSC.Auth.Key) {
-		return ErrInvalidIPSCAuthKey
+	if c.IPSC.Enabled && c.Hytera.Enabled && c.Hytera.P2PPort == c.IPSC.Port {
+		return ErrIPSCPortConflict
 	}
 
 	return nil
 }
 
+func (c Config) DisplayAddressIP() string {
+	if ip := strings.TrimSpace(c.DisplayIP); ip != "" {
+		return ip
+	}
+	return strings.TrimSpace(c.IPSC.IP)
+}
+
 func validateSlot(slot uint) bool {
 	return slot == 1 || slot == 2
+}
+
+func (c Config) FirstMMDVM() *MMDVM {
+	if len(c.MMDVMClients) > 0 {
+		return &c.MMDVMClients[0]
+	}
+	if len(c.MMDVMServers) > 0 {
+		return &c.MMDVMServers[0]
+	}
+	return nil
+}
+
+func (c Config) BridgeID() uint32 {
+	if c.Local.ID != 0 {
+		return c.Local.ID
+	}
+	if network := c.FirstMMDVM(); network != nil {
+		return network.ID
+	}
+	return 9000000
+}
+
+func validateMMDVMNetworks(networks []MMDVM, requireMaster, requireIdentity bool, names, listeners map[string]struct{}) error {
+	for i := range networks {
+		h := &networks[i]
+
+		if h.Name == "" {
+			return ErrInvalidMMDVMName
+		}
+		if _, ok := names[h.Name]; ok {
+			return ErrDuplicateMMDVMName
+		}
+		names[h.Name] = struct{}{}
+
+		if requireIdentity {
+			if h.Callsign == "" {
+				return ErrInvalidMMDVMCallsign
+			}
+			if h.ColorCode > 15 {
+				return ErrInvalidMMDVMColorCode
+			}
+			if h.Longitude < -180 || h.Longitude > 180 {
+				return ErrInvalidMMDVMLongitude
+			}
+			if h.Latitude < -90 || h.Latitude > 90 {
+				return ErrInvalidMMDVMLatitude
+			}
+		}
+
+		if requireMaster {
+			if h.MasterServer == "" {
+				return ErrInvalidMMDVMMasterServer
+			}
+		} else {
+			if h.Listen == "" {
+				h.Listen = ":62031"
+			}
+			if _, _, err := net.SplitHostPort(h.Listen); err != nil {
+				return ErrInvalidMMDVMListen
+			}
+			if _, ok := listeners[h.Listen]; ok {
+				return ErrDuplicateMMDVMListen
+			}
+			listeners[h.Listen] = struct{}{}
+		}
+
+		if h.Password == "" {
+			return ErrInvalidMMDVMPassword
+		}
+		if err := validateRewrites(h); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateRewrites(h *MMDVM) error {

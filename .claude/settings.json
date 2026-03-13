@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test ./internal/ipsc/... -count=1)",
+      "Read(//home/caocheng/go/pkg/mod/github.com/!u!s!a-!red!dragon/dmrgo@v0.0.1/dmr/layer2/**)",
+      "Read(//home/caocheng/go/pkg/mod/github.com/!u!s!a-!red!dragon/dmrgo@v0.0.1/dmr/enums//**)",
+      "Read(//home/caocheng/go/pkg/mod/github.com/!u!s!a-!red!dragon/dmrgo@v0.0.1/dmr/enums/**)",
+      "Read(//home/caocheng/ham/Hytera_Homebrew_Bridge/hytera_homebrew_bridge/lib/**)",
+      "Read(//home/caocheng/go/pkg/mod/github.com/!u!s!a-!red!dragon/**)",
+      "Read(//home/caocheng/ham/Hytera_Homebrew_Bridge/**)",
+      "Bash(go test:*)",
+      "Read(//home/caocheng/go/pkg/mod/**)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

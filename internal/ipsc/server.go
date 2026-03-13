@@ -16,7 +16,6 @@ import (
 
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
-	"github.com/vishvananda/netlink"
 )
 
 type IPSCServer struct {
@@ -25,12 +24,16 @@ type IPSCServer struct {
 	udp     *net.UDPConn
 	mu      sync.RWMutex
 
-	localID  uint32
-	authKey  []byte // 20-byte HMAC key decoded from hex
-	peers    map[uint32]*Peer
-	lastSend map[uint32]time.Time
+	localID   uint32
+	authKey   []byte // 20-byte HMAC key decoded from hex
+	peers     map[uint32]*Peer
+	lastSend  map[uint32]time.Time
+	peerLocks map[string]*sync.Mutex
 
-	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
+	burstHandler       func(packetType byte, data []byte, addr *net.UDPAddr)
+	peerHandler        func(peer Peer)
+	peerOfflineHandler func(sourceKey string)
+	sendFilter         func(sourceKey string) bool
 
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
@@ -93,30 +96,24 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		}
 	}
 
-	// Use the first MMDVM network's ID as the local peer identity.
-	var localID uint32
-	if len(cfg.MMDVM) > 0 {
-		localID = cfg.MMDVM[0].ID
-	}
+	// Use the first configured MMDVM network's ID as the local peer identity.
+	localID := cfg.BridgeID()
 
 	return &IPSCServer{
-		cfg:      cfg,
-		metrics:  m,
-		localID:  localID,
-		authKey:  authKey,
-		peers:    map[uint32]*Peer{},
-		lastSend: map[uint32]time.Time{},
+		cfg:       cfg,
+		metrics:   m,
+		localID:   localID,
+		authKey:   authKey,
+		peers:     map[uint32]*Peer{},
+		lastSend:  map[uint32]time.Time{},
+		peerLocks: map[string]*sync.Mutex{},
 	}
 }
 
 func (s *IPSCServer) Start() error {
-	// if err := s.netlink(); err != nil {
-	// 	return fmt.Errorf("error configuring network: %w", err)
-	// }
-
 	var err error
 	s.udp, err = net.ListenUDP("udp", &net.UDPAddr{
-		IP:   net.ParseIP(s.cfg.IPSC.IP),
+		IP:   net.IPv4zero,
 		Port: int(s.cfg.IPSC.Port),
 	})
 
@@ -126,6 +123,8 @@ func (s *IPSCServer) Start() error {
 
 	s.wg.Add(1)
 	go s.handler()
+	s.wg.Add(1)
+	go s.peerExpiryLoop()
 
 	return nil
 }
@@ -141,36 +140,6 @@ func (s *IPSCServer) Stop() {
 		}
 	})
 	s.wg.Wait()
-}
-
-func (s *IPSCServer) netlink() error {
-	link, err := netlink.LinkByName(s.cfg.IPSC.Interface)
-	if err != nil {
-		return fmt.Errorf("cannot find interface %s: %w", s.cfg.IPSC.Interface, err)
-	}
-
-	// Remove any existing addresses from the interface
-	existingAddrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
-	if err != nil {
-		return fmt.Errorf("cannot list addresses on interface %s: %w", s.cfg.IPSC.Interface, err)
-	}
-	for i := range existingAddrs {
-		if err := netlink.AddrDel(link, &existingAddrs[i]); err != nil {
-			return fmt.Errorf("cannot remove address %s from interface %s: %w", existingAddrs[i].IPNet, s.cfg.IPSC.Interface, err)
-		}
-	}
-
-	if err := netlink.AddrReplace(link, &netlink.Addr{IPNet: &net.IPNet{IP: net.ParseIP(s.cfg.IPSC.IP), Mask: net.CIDRMask(s.cfg.IPSC.SubnetMask, 32)}}); err != nil {
-		return fmt.Errorf("cannot add IP address to interface %s: %w", s.cfg.IPSC.Interface, err)
-	}
-
-	if link.Attrs().Flags&net.FlagUp == 0 {
-		if err := netlink.LinkSetUp(link); err != nil {
-			return fmt.Errorf("cannot set interface up %s: %w", s.cfg.IPSC.Interface, err)
-		}
-	}
-
-	return nil
 }
 
 func (s *IPSCServer) handler() {
@@ -191,9 +160,12 @@ func (s *IPSCServer) handler() {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
+		lock := s.peerPacketLock(addr)
 		s.wg.Add(1)
-		go func(packetData []byte, packetAddr *net.UDPAddr) {
+		go func(packetData []byte, packetAddr *net.UDPAddr, peerLock *sync.Mutex) {
 			defer s.wg.Done()
+			peerLock.Lock()
+			defer peerLock.Unlock()
 			packet, err := s.handlePacket(packetData, packetAddr)
 			if err != nil {
 				if errors.Is(err, ErrPacketIgnored) {
@@ -203,9 +175,29 @@ func (s *IPSCServer) handler() {
 				return
 			}
 
-			slog.Debug("received packet", "peer", packetAddr, "length", len(packetData), "packet", packet)
-		}(data, addr)
+			slog.Debug("received packet",
+				"protocol", "ipsc",
+				"channel", "udp",
+				"peer", packetAddr,
+				"length", len(packetData),
+				"packet", packet)
+		}(data, addr, lock)
 	}
+}
+
+func (s *IPSCServer) peerPacketLock(addr *net.UDPAddr) *sync.Mutex {
+	key := ""
+	if addr != nil {
+		key = addr.String()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lock := s.peerLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		s.peerLocks[key] = lock
+	}
+	return lock
 }
 
 func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, error) {
@@ -381,6 +373,14 @@ func (s *IPSCServer) SetBurstHandler(handler func(packetType byte, data []byte, 
 	s.burstHandler = handler
 }
 
+func (s *IPSCServer) SetPeerUpdateHandler(handler func(peer Peer)) {
+	s.peerHandler = handler
+}
+
+func (s *IPSCServer) SetPeerOfflineHandler(handler func(sourceKey string)) {
+	s.peerOfflineHandler = handler
+}
+
 func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, flags [4]byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -399,6 +399,9 @@ func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, fla
 	if s.metrics != nil {
 		s.metrics.IPSCPeersRegistered.Set(float64(len(s.peers)))
 	}
+	if s.peerHandler != nil {
+		s.peerHandler(*peer)
+	}
 }
 
 func (s *IPSCServer) markPeerAlive(peerID uint32, addr *net.UDPAddr) {
@@ -413,6 +416,47 @@ func (s *IPSCServer) markPeerAlive(peerID uint32, addr *net.UDPAddr) {
 	peer.Addr = cloneUDPAddr(addr)
 	peer.LastSeen = time.Now()
 	peer.KeepAliveReceived++
+	if s.peerHandler != nil {
+		s.peerHandler(*peer)
+	}
+}
+
+const ipscPeerTimeout = 30 * time.Second
+
+func (s *IPSCServer) peerExpiryLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if s.stopped.Load() {
+			return
+		}
+		s.expireStalePeers()
+	}
+}
+
+func (s *IPSCServer) expireStalePeers() {
+	now := time.Now()
+	s.mu.Lock()
+	var expired []Peer
+	for id, peer := range s.peers {
+		if now.Sub(peer.LastSeen) > ipscPeerTimeout {
+			expired = append(expired, *peer)
+			delete(s.peers, id)
+		}
+	}
+	if s.metrics != nil && len(expired) > 0 {
+		s.metrics.IPSCPeersRegistered.Set(float64(len(s.peers)))
+	}
+	s.mu.Unlock()
+
+	for _, peer := range expired {
+		sourceKey := fmt.Sprintf("moto:%d", peer.ID)
+		slog.Info("IPSC peer offline (timeout)", "sourceKey", sourceKey, "peerID", peer.ID)
+		if s.peerOfflineHandler != nil {
+			s.peerOfflineHandler(sourceKey)
+		}
+	}
 }
 
 func (s *IPSCServer) buildMasterRegisterReply() []byte {
@@ -589,17 +633,80 @@ func (s *IPSCServer) SendUserPacket(data []byte) {
 	s.mu.RUnlock()
 
 	for _, peer := range peers {
+		if s.sendFilter != nil && !s.sendFilter(fmt.Sprintf("moto:%d", peer.ID)) {
+			continue
+		}
 		s.pacePeer(peer.ID)
 		packetData := make([]byte, len(data))
 		copy(packetData, data)
 		packet := &Packet{data: packetData}
-		slog.Debug("IPSC burst sending", "peer", peer.Addr, "length", len(packet.data))
+		callInfo := byte(0x00)
+		burstType := byte(0x00)
+		slotMarker := byte(0x00)
+		slot := "n/a"
+		if len(packet.data) > 17 {
+			callInfo = packet.data[17]
+			slot = "ts1"
+			if callInfo&0x20 != 0 {
+				slot = "ts2"
+			}
+		}
+		if len(packet.data) > 30 {
+			burstType = packet.data[30]
+		}
+		if len(packet.data) > 35 {
+			slotMarker = packet.data[35]
+		}
+		slog.Debug("IPSC burst sending",
+			"peer", peer.Addr,
+			"length", len(packet.data),
+			"slot", slot,
+			"callInfo", fmt.Sprintf("0x%02X", callInfo),
+			"burstType", fmt.Sprintf("0x%02X", burstType),
+			"slotMarker", fmt.Sprintf("0x%02X", slotMarker))
 		if err := s.sendPacket(packet, peer.Addr); err != nil {
 			slog.Warn("failed sending IPSC user packet", "peer", peer.Addr, "error", err)
 		} else if s.metrics != nil {
 			s.metrics.IPSCPacketsSent.Inc()
 		}
 	}
+}
+
+func (s *IPSCServer) SendUserPacketToPeer(peerID uint32, data []byte) bool {
+	if s.stopped.Load() || peerID == 0 {
+		return false
+	}
+	if s.sendFilter != nil && !s.sendFilter(fmt.Sprintf("moto:%d", peerID)) {
+		return false
+	}
+
+	s.mu.RLock()
+	peer := s.peers[peerID]
+	var addr *net.UDPAddr
+	if peer != nil && peer.Addr != nil {
+		addr = cloneUDPAddr(peer.Addr)
+	}
+	s.mu.RUnlock()
+	if addr == nil {
+		return false
+	}
+
+	s.pacePeer(peerID)
+	packetData := make([]byte, len(data))
+	copy(packetData, data)
+	packet := &Packet{data: packetData}
+	if err := s.sendPacket(packet, addr); err != nil {
+		slog.Warn("failed sending IPSC user packet to peer", "peerID", peerID, "peer", addr, "error", err)
+		return false
+	}
+	if s.metrics != nil {
+		s.metrics.IPSCPacketsSent.Inc()
+	}
+	return true
+}
+
+func (s *IPSCServer) SetSendFilter(filter func(sourceKey string) bool) {
+	s.sendFilter = filter
 }
 
 func (s *IPSCServer) pacePeer(peerID uint32) {

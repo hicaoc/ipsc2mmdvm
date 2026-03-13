@@ -19,24 +19,26 @@ import (
 )
 
 type MMDVMClient struct {
-	cfg          *config.MMDVM
-	metrics      *metrics.Metrics
-	started      atomic.Bool
-	done         chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
-	tx_chan      chan proto.Packet
-	conn         net.Conn
-	connMu       sync.Mutex // protects conn
-	state        atomic.Uint32
-	connRX       chan []byte
-	connTX       chan []byte
-	keepAlive    time.Duration
-	timeout      time.Duration
-	lastPing     atomic.Int64 // UnixNano — last MSTPONG received
-	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
-	ipscHandler  func(data []byte)
-	translator   *ipsc.IPSCTranslator
+	cfg           *config.MMDVM
+	metrics       *metrics.Metrics
+	started       atomic.Bool
+	done          chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	tx_chan       chan proto.Packet
+	conn          net.Conn
+	connMu        sync.Mutex // protects conn
+	state         atomic.Uint32
+	connRX        chan []byte
+	connTX        chan []byte
+	keepAlive     time.Duration
+	timeout       time.Duration
+	lastPing      atomic.Int64 // UnixNano — last MSTPONG received
+	lastPingSent  atomic.Int64 // UnixNano — last RPTPING sent
+	ipscHandler   func(data []byte)
+	packetHandler func(packet proto.Packet)
+	statusHandler func(status ClientStatus)
+	translator    *ipsc.IPSCTranslator
 
 	// Rewrite rules built from config, applied to packets
 	// flowing through this network.
@@ -52,6 +54,28 @@ type MMDVMClient struct {
 }
 
 type state uint8
+
+type ClientStatus struct {
+	SourceKey   string
+	Name        string
+	Callsign    string
+	DMRID       uint32
+	Master      string
+	Status      string
+	Online      bool
+	LastSeenAt  time.Time
+	RXFreq      uint
+	TXFreq      uint
+	TXPower     uint8
+	ColorCode   uint8
+	Latitude    float64
+	Longitude   float64
+	Height      uint16
+	Location    string
+	Description string
+	URL         string
+	Slots       byte
+}
 
 const (
 	STATE_IDLE state = iota
@@ -90,6 +114,9 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		translator:   translator,
 		inboundTSMgr: timeslot.NewManager(),
 	}
+	// Shorter inbound reclaim to avoid long one-way talk burst delays
+	// when upstream misses a terminator frame.
+	c.inboundTSMgr.SetTimeout(600 * time.Millisecond)
 	c.state.Store(uint32(STATE_IDLE))
 	c.buildRewriteRules()
 	if m != nil {
@@ -104,6 +131,37 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 // Name returns the configured network name for this client.
 func (h *MMDVMClient) Name() string {
 	return h.cfg.Name
+}
+
+func (h *MMDVMClient) SetStatusHandler(handler func(status ClientStatus)) {
+	h.statusHandler = handler
+}
+
+func (h *MMDVMClient) publishStatus(status string, online bool) {
+	if h.statusHandler == nil {
+		return
+	}
+	h.statusHandler(ClientStatus{
+		SourceKey:   "mmdvm-upstream:" + h.cfg.Name,
+		Name:        h.cfg.Name,
+		Callsign:    h.cfg.Callsign,
+		DMRID:       h.cfg.ID,
+		Master:      h.cfg.MasterServer,
+		Status:      status,
+		Online:      online,
+		LastSeenAt:  time.Now().UTC(),
+		RXFreq:      h.cfg.RXFreq,
+		TXFreq:      h.cfg.TXFreq,
+		TXPower:     h.cfg.TXPower,
+		ColorCode:   h.cfg.ColorCode,
+		Latitude:    h.cfg.Latitude,
+		Longitude:   h.cfg.Longitude,
+		Height:      h.cfg.Height,
+		Location:    h.cfg.Location,
+		Description: h.cfg.Description,
+		URL:         h.cfg.URL,
+		Slots:       h.cfg.Slots,
+	})
 }
 
 // buildRewriteRules constructs the rewrite rule chains from config.
@@ -192,6 +250,7 @@ func (h *MMDVMClient) Start() error {
 	}
 
 	slog.Info("Connecting to MMDVM server", "network", h.cfg.Name)
+	h.publishStatus("connecting", false)
 
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
@@ -237,7 +296,12 @@ func (h *MMDVMClient) handler() {
 	for {
 		select {
 		case data := <-h.connRX:
-			slog.Debug("received packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
+			slog.Debug("received packet",
+				"protocol", "mmdvm",
+				"channel", "client",
+				"network", h.cfg.Name,
+				"data", fmt.Sprintf("% X", data),
+				"strdata", string(data))
 			if len(data) < 4 {
 				slog.Warn("Ignoring short packet from MMDVM server", "network", h.cfg.Name, "length", len(data))
 				continue
@@ -274,6 +338,7 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 			return
 		}
 		slog.Info("Connected. Authenticating", "network", h.cfg.Name)
+		h.publishStatus("authenticating", false)
 		random := data[len(data)-4:]
 		h.sendRPTK(random)
 		h.state.Store(uint32(STATE_SENT_AUTH))
@@ -287,10 +352,12 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 func (h *MMDVMClient) handleSentAuth(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
 		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
+		h.publishStatus("configuring", false)
 		h.state.Store(uint32(STATE_SENT_RPTC))
 		h.sendRPTC()
 	} else if len(data) >= 6 && string(data[:6]) == "RPTNAK" {
 		slog.Info("Password rejected", "network", h.cfg.Name)
+		h.publishStatus("auth_failed", false)
 		if h.metrics != nil {
 			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
 		}
@@ -304,6 +371,7 @@ func (h *MMDVMClient) handleSentRPTC(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
 		slog.Info("Config accepted, starting ping routine", "network", h.cfg.Name)
 		h.state.Store(uint32(STATE_READY))
+		h.publishStatus("online", true)
 		if h.metrics != nil {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
 		}
@@ -328,6 +396,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 				}
 			}
 			h.lastPing.Store(now.UnixNano())
+			h.publishStatus("online", true)
 		}
 	case "RPTS":
 		if len(data) >= 7 && string(data[:7]) == "RPTSBKN" {
@@ -343,35 +412,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 			h.metrics.MMDVMPacketsReceived.WithLabelValues(h.cfg.Name).Inc()
 		}
 		slog.Debug("MMDVM DMRD received", "network", h.cfg.Name, "packet", packet)
-
-		if !rewrite.Apply(h.netRewrites, &packet) {
-			slog.Debug("MMDVM DMRD dropped (no rewrite rule matched)", "network", h.cfg.Name)
-			if h.metrics != nil {
-				h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "no_rewrite").Inc()
-			}
-			return
-		}
-
-		slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
-
-		// Timeslot arbitration: buffer competing calls, deliver FIFO.
-		isTerminator := packet.FrameType == frameTypeDataSync && packet.DTypeOrVSeq == dtypeTerminatorWithLC
-		if h.outboundTSMgr != nil {
-			if !h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet) {
-				slog.Debug("MMDVM DMRD buffered (timeslot busy)",
-					"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
-				if h.metrics != nil {
-					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_busy").Inc()
-				}
-				return
-			}
-		}
-
-		h.translateAndForwardToIPSC(packet)
-
-		if isTerminator && h.outboundTSMgr != nil {
-			h.drainPendingOutbound(packet.Slot, packet.StreamID)
-		}
+		h.handleOutboundPacket(packet)
 	default:
 		slog.Info("Got unknown packet from MMDVM server", "network", h.cfg.Name, "data", data)
 	}
@@ -389,6 +430,7 @@ func (h *MMDVMClient) ping() {
 			lastPingTime := time.Unix(0, h.lastPing.Load())
 			if time.Now().After(lastPingTime.Add(h.timeout)) {
 				slog.Info("Connection timed out", "network", h.cfg.Name)
+				h.publishStatus("timeout", false)
 				h.reconnect()
 				return
 			}
@@ -416,6 +458,7 @@ func (h *MMDVMClient) handshakeWatchdog() {
 				return
 			}
 			slog.Warn("Handshake timed out, reconnecting", "network", h.cfg.Name, "state", st)
+			h.publishStatus("handshake_timeout", false)
 			h.reconnect()
 			// Stay in the loop to watch the next handshake attempt.
 		case <-h.done:
@@ -428,6 +471,7 @@ func (h *MMDVMClient) handshakeWatchdog() {
 // sends a fresh login. It is safe to call from any goroutine.
 func (h *MMDVMClient) reconnect() {
 	h.state.Store(uint32(STATE_TIMEOUT))
+	h.publishStatus("reconnecting", false)
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(0)
 		h.metrics.MMDVMReconnects.WithLabelValues(h.cfg.Name).Inc()
@@ -441,6 +485,7 @@ func (h *MMDVMClient) reconnect() {
 	h.connMu.Unlock()
 	if err := h.connect(); err != nil {
 		slog.Error("Error reconnecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		h.publishStatus("connect_failed", false)
 	}
 	h.state.Store(uint32(STATE_SENT_LOGIN))
 	h.sendLogin()
@@ -453,9 +498,23 @@ func (h *MMDVMClient) tx() {
 		case <-h.done:
 			return
 		case data := <-h.connTX:
+			packet, ok := proto.Decode(data)
+			if ok {
+				slog.Debug("MMDVM outbound packet writing",
+					"network", h.cfg.Name,
+					"state", state(h.state.Load()&0xFF),
+					"seq", packet.Seq,
+					"src", packet.Src,
+					"dst", packet.Dst,
+					"slot", packet.Slot,
+					"groupCall", packet.GroupCall,
+					"frameType", packet.FrameType,
+					"dtypeOrVSeq", packet.DTypeOrVSeq,
+					"streamID", packet.StreamID,
+				)
+			}
 			h.connMu.Lock()
-			slog.Debug("sending packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
-			_, err := h.conn.Write(data)
+			n, err := h.conn.Write(data)
 			h.connMu.Unlock()
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
@@ -476,6 +535,19 @@ func (h *MMDVMClient) tx() {
 				}
 				slog.Error("Error writing to MMDVM server", "network", h.cfg.Name, "error", err)
 				continue
+			}
+			if ok {
+				slog.Debug("MMDVM outbound packet wrote",
+					"network", h.cfg.Name,
+					"bytes", n,
+					"seq", packet.Seq,
+					"src", packet.Src,
+					"dst", packet.Dst,
+					"slot", packet.Slot,
+					"frameType", packet.FrameType,
+					"dtypeOrVSeq", packet.DTypeOrVSeq,
+					"streamID", packet.StreamID,
+				)
 			}
 		}
 	}
@@ -520,6 +592,7 @@ func (h *MMDVMClient) rx() {
 func (h *MMDVMClient) Stop() {
 	h.stopOnce.Do(func() {
 		slog.Info("Stopping MMDVM client", "network", h.cfg.Name)
+		h.publishStatus("stopped", false)
 
 		// Signal all goroutines to stop.
 		close(h.done)
@@ -566,11 +639,45 @@ func (h *MMDVMClient) forwardTX() {
 
 // translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
 func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
+	if h.packetHandler != nil {
+		h.packetHandler(packet)
+		return
+	}
 	if h.ipscHandler != nil && h.translator != nil {
 		ipscPackets := h.translator.TranslateToIPSC(packet)
 		for _, ipscData := range ipscPackets {
 			h.ipscHandler(ipscData)
 		}
+	}
+}
+
+func (h *MMDVMClient) handleOutboundPacket(packet proto.Packet) {
+	if !rewrite.Apply(h.netRewrites, &packet) {
+		slog.Debug("MMDVM DMRD dropped (no rewrite rule matched)", "network", h.cfg.Name)
+		if h.metrics != nil {
+			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "no_rewrite").Inc()
+		}
+		return
+	}
+
+	slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
+
+	isTerminator := packet.FrameType == frameTypeDataSync && packet.DTypeOrVSeq == dtypeTerminatorWithLC
+	if h.outboundTSMgr != nil {
+		if !h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet) {
+			slog.Debug("MMDVM DMRD buffered (timeslot busy)",
+				"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
+			if h.metrics != nil {
+				h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_busy").Inc()
+			}
+			return
+		}
+	}
+
+	h.translateAndForwardToIPSC(packet)
+
+	if isTerminator && h.outboundTSMgr != nil {
+		h.drainPendingOutbound(packet.Slot, packet.StreamID)
 	}
 }
 
@@ -642,11 +749,36 @@ func (h *MMDVMClient) SetIPSCHandler(handler func(data []byte)) {
 	h.ipscHandler = handler
 }
 
+// SetPacketHandler overrides MMDVM→repeater forwarding with raw proto.Packet
+// delivery. Used by repeater frontends that don't use standard IPSC framing.
+func (h *MMDVMClient) SetPacketHandler(handler func(packet proto.Packet)) {
+	h.packetHandler = handler
+}
+
 // SetOutboundTSManager sets the shared timeslot manager used for the
 // MMDVM→IPSC direction. This manager is shared across all clients so
 // that only one MMDVM master can feed a given timeslot at a time.
 func (h *MMDVMClient) SetOutboundTSManager(mgr *timeslot.Manager) {
 	h.outboundTSMgr = mgr
+}
+
+// MatchesPacket checks whether a decoded packet would match this client's
+// rewrite rules. When passallOnly is true, only passall rules are checked.
+func (h *MMDVMClient) MatchesPacket(pkt proto.Packet, passallOnly bool) bool {
+	probe := pkt
+	if passallOnly {
+		return rewrite.Apply(h.passallRewrites, &probe)
+	}
+	return rewrite.Apply(h.rfRewrites, &probe)
+}
+
+// HandleTranslatedPacket forwards an already decoded packet to this MMDVM
+// client after applying rewrite rules and timeslot arbitration.
+func (h *MMDVMClient) HandleTranslatedPacket(pkt proto.Packet, _ *net.UDPAddr) bool {
+	if !h.started.Load() {
+		return false
+	}
+	return h.handleInboundPackets([]proto.Packet{pkt})
 }
 
 // MatchesRules checks whether the given IPSC data would match this client's
@@ -679,12 +811,13 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 	if !h.started.Load() {
 		return false
 	}
-	slog.Debug("HandleIPSCBurst: received IPSC burst", "network", h.cfg.Name, "type", packetType, "from", addr, "length", len(data))
-
 	packets := h.translator.TranslateToMMDVM(packetType, data)
+	return h.handleInboundPackets(packets)
+}
+
+func (h *MMDVMClient) handleInboundPackets(packets []proto.Packet) bool {
 	matched := false
 	for _, pkt := range packets {
-		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
 		// Apply RF→Net rewrite rules (outbound to this master).
 		// Try specific rewrites first; if none match, try passall
 		// rules as a fallback.
@@ -697,14 +830,11 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 				continue
 			}
 		}
-		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
 
 		// Timeslot arbitration: buffer competing calls, deliver FIFO.
 		isTerminator := pkt.FrameType == frameTypeDataSync && pkt.DTypeOrVSeq == dtypeTerminatorWithLC
 		if h.inboundTSMgr != nil {
 			if !h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt) {
-				slog.Debug("HandleIPSCBurst: buffered (timeslot busy)",
-					"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
 				if h.metrics != nil {
 					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_busy").Inc()
 				}

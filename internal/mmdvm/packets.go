@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
@@ -84,6 +85,29 @@ func (h *MMDVMClient) sendPing() {
 func (h *MMDVMClient) sendPacket(packet proto.Packet) {
 	data := make([]byte, 53)
 	copy(data, packet.Encode())
+	st := state(h.state.Load() & 0xFF)
+	slog.Debug("MMDVM outbound packet queued",
+		"network", h.cfg.Name,
+		"state", st,
+		"seq", packet.Seq,
+		"src", packet.Src,
+		"dst", packet.Dst,
+		"slot", packet.Slot,
+		"groupCall", packet.GroupCall,
+		"frameType", packet.FrameType,
+		"dtypeOrVSeq", packet.DTypeOrVSeq,
+		"streamID", packet.StreamID,
+	)
+	if st != STATE_READY {
+		slog.Warn("MMDVM outbound packet queued before ready",
+			"network", h.cfg.Name,
+			"state", st,
+			"seq", packet.Seq,
+			"src", packet.Src,
+			"dst", packet.Dst,
+			"streamID", packet.StreamID,
+		)
+	}
 	if h.metrics != nil {
 		h.metrics.MMDVMPacketsSent.WithLabelValues(h.cfg.Name).Inc()
 	}

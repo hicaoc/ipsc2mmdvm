@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/dmr/enums"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
@@ -13,6 +14,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	l3elements "github.com/USA-RedDragon/dmrgo/dmr/layer3/elements"
 	"github.com/USA-RedDragon/dmrgo/dmr/vocoder"
+	"github.com/hicaoc/ipsc2mmdvm/internal/dmr/bptc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
 	mmdvm "github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 )
@@ -29,6 +31,7 @@ type IPSCTranslator struct {
 	metrics        *metrics.Metrics
 	peerID         uint32
 	repeaterID     uint32
+	colorCode      uint8
 	streams        map[uint32]*streamState
 	reverseStreams map[uint32]*reverseStreamState
 	burst          layer2.Burst // reusable burst to reduce allocations
@@ -46,6 +49,11 @@ type streamState struct {
 	headersSent  int  // number of voice headers sent (3 required)
 	burstIndex   int  // 0-5 → A-F
 	firstPacket  bool // true for the very first packet
+	src          uint
+	dst          uint
+	slot         bool
+	groupCall    bool
+	lastSeen     time.Time
 }
 
 // IPSC burst data type constants (byte 30 of IPSC voice packet)
@@ -66,6 +74,8 @@ const (
 
 // RTP timestamp increment per burst (~60ms spacing in 16.16 format)
 const rtpTimestampIncrement = 480
+const ipscVoiceHeaderRepeats = 2
+const forwardStreamReuseWindow = 8 * time.Second
 
 func NewIPSCTranslator() (*IPSCTranslator, error) {
 	return &IPSCTranslator{
@@ -85,6 +95,11 @@ func (t *IPSCTranslator) SetPeerID(peerID uint32) {
 	t.repeaterID = peerID
 }
 
+// SetColorCode sets the DMR color code used when building DMR bursts.
+func (t *IPSCTranslator) SetColorCode(cc uint8) {
+	t.colorCode = cc & 0x0F
+}
+
 // TranslateToIPSC converts an MMDVM DMRD Packet into one or more IPSC
 // user packets ready to send to IPSC peers. It returns nil if the packet
 // cannot be translated (e.g. non-voice data we don't handle yet).
@@ -100,6 +115,16 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 	// Get or create stream state
 	ss, ok := t.streams[uint32(streamID)]
 	if !ok {
+		now := time.Now()
+		if pkt.FrameType == mmdvmFrameTypeVoice || pkt.FrameType == mmdvmFrameTypeVoiceSync {
+			if recent := t.findRecentForwardStream(pkt, now); recent != nil {
+				ss = recent
+				t.streams[uint32(streamID)] = ss
+				ok = true
+			}
+		}
+	}
+	if !ok {
 		t.nextCallControl++
 		if t.nextCallControl == 0 {
 			t.nextCallControl = 1
@@ -107,12 +132,22 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		ss = &streamState{
 			callControl: t.nextCallControl,
 			firstPacket: true,
+			src:         pkt.Src,
+			dst:         pkt.Dst,
+			slot:        pkt.Slot,
+			groupCall:   pkt.GroupCall,
+			lastSeen:    time.Now(),
 		}
 		t.streams[uint32(streamID)] = ss
 		if t.metrics != nil {
 			t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Inc()
 		}
 	}
+	ss.src = pkt.Src
+	ss.dst = pkt.Dst
+	ss.slot = pkt.Slot
+	ss.groupCall = pkt.GroupCall
+	ss.lastSeen = time.Now()
 
 	frameType := pkt.FrameType
 	dtypeOrVSeq := pkt.DTypeOrVSeq
@@ -128,19 +163,19 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		// Voice LC Header, Terminator, or Data
 		switch elements.DataType(dtypeOrVSeq) {
 		case elements.DataTypeVoiceLCHeader:
-			// Send voice header (IPSC sends 3 copies)
-			for i := 0; i < 3; i++ {
+			// Send a small number of startup headers for Moto/IPSC peers.
+			for i := 0; i < ipscVoiceHeaderRepeats; i++ {
 				data := t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket)
 				results = append(results, data)
 			}
-			ss.headersSent = 3
+			ss.headersSent = ipscVoiceHeaderRepeats
 			ss.firstPacket = false
 			ss.burstIndex = 0
 		case elements.DataTypeTerminatorWithLC:
 			data := t.buildVoiceTerminator(pkt, ss)
 			results = append(results, data)
 			// Clean up stream state
-			delete(t.streams, uint32(streamID))
+			t.removeForwardStreamAliases(ss)
 			if t.metrics != nil {
 				t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Dec()
 			}
@@ -177,6 +212,30 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		t.metrics.TranslatorPackets.WithLabelValues("mmdvm_to_ipsc").Add(float64(len(results)))
 	}
 
+	for _, data := range results {
+		if len(data) < 31 {
+			continue
+		}
+		callInfo := data[17]
+		slot := "ts1"
+		if callInfo&0x20 != 0 {
+			slot = "ts2"
+		}
+		slotMarker := byte(0x00)
+		if len(data) > 35 {
+			slotMarker = data[35]
+		}
+		slog.Debug("IPSCTranslator: TranslateToIPSC",
+			"slot", slot,
+			"callInfo", fmt.Sprintf("0x%02X", callInfo),
+			"burstType", fmt.Sprintf("0x%02X", data[30]),
+			"slotMarker", fmt.Sprintf("0x%02X", slotMarker),
+			"length", len(data),
+			"src", pkt.Src,
+			"dst", pkt.Dst,
+			"streamID", pkt.StreamID)
+	}
+
 	return results
 }
 
@@ -185,6 +244,33 @@ func (t *IPSCTranslator) CleanupStream(streamID uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.streams, streamID)
+}
+
+func (t *IPSCTranslator) findRecentForwardStream(pkt mmdvm.Packet, now time.Time) *streamState {
+	for _, ss := range t.streams {
+		if ss == nil {
+			continue
+		}
+		if ss.src != pkt.Src || ss.dst != pkt.Dst || ss.groupCall != pkt.GroupCall || ss.slot != pkt.Slot {
+			continue
+		}
+		if ss.lastSeen.IsZero() || now.Sub(ss.lastSeen) > forwardStreamReuseWindow {
+			continue
+		}
+		return ss
+	}
+	return nil
+}
+
+func (t *IPSCTranslator) removeForwardStreamAliases(target *streamState) {
+	if target == nil {
+		return
+	}
+	for key, ss := range t.streams {
+		if ss == target {
+			delete(t.streams, key)
+		}
+	}
 }
 
 // buildIPSCHeader writes the common 18-byte IPSC header (bytes 0-17).
@@ -449,16 +535,14 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 	return buf
 }
 
-// extractFullLCBytes builds 12 bytes of Full Link Control data
-// from the packet fields, using the dmrgo library's encoder.
-func extractFullLCBytes(pkt mmdvm.Packet) [12]byte {
+func buildStandardLCBytes(src, dst uint, groupCall bool) [12]byte {
 	flco := enums.FLCOUnitToUnitVoiceChannelUser
-	if pkt.Dst > math.MaxInt || pkt.Src > math.MaxInt {
+	if dst > math.MaxInt || src > math.MaxInt {
 		slog.Error("Full LC address out of range")
 		return [12]byte{}
 	}
 
-	if pkt.GroupCall {
+	if groupCall {
 		flco = enums.FLCOGroupVoiceChannelUser
 	}
 
@@ -468,9 +552,9 @@ func extractFullLCBytes(pkt mmdvm.Packet) [12]byte {
 		ServiceOptions: l3elements.ServiceOptions{
 			Reserved: [2]byte{1, 0}, // Sets 0x20 (Default)
 		},
-		GroupAddress:  int(pkt.Dst),
-		TargetAddress: int(pkt.Dst),
-		SourceAddress: int(pkt.Src),
+		GroupAddress:  int(dst),
+		TargetAddress: int(dst),
+		SourceAddress: int(src),
 	}
 
 	encoded, err := flc.Encode()
@@ -484,12 +568,124 @@ func extractFullLCBytes(pkt mmdvm.Packet) [12]byte {
 	return res
 }
 
+func recoverAddressesFromFullLC(ipscData []byte, burstType byte) (uint, uint, bool) {
+	if len(ipscData) < 50 {
+		return 0, 0, false
+	}
+
+	var dataType elements.DataType
+	switch burstType {
+	case ipscBurstVoiceHead:
+		dataType = elements.DataTypeVoiceLCHeader
+	case ipscBurstVoiceTerm:
+		dataType = elements.DataTypeTerminatorWithLC
+	default:
+		return 0, 0, false
+	}
+
+	var infoBits [96]byte
+	for idx, b := range ipscData[38:50] {
+		for bit := 0; bit < 8; bit++ {
+			infoBits[idx*8+bit] = (b >> (7 - bit)) & 1
+		}
+	}
+
+	var flc pdu.FullLinkControl
+	if !flc.DecodeFromBits(infoBits[:], dataType) {
+		return 0, 0, false
+	}
+	if flc.SourceAddress <= 0 {
+		return 0, 0, false
+	}
+
+	src := uint(flc.SourceAddress)
+	dst := uint(0)
+	switch flc.FLCO {
+	case enums.FLCOGroupVoiceChannelUser:
+		if flc.GroupAddress <= 0 {
+			return 0, 0, false
+		}
+		dst = uint(flc.GroupAddress)
+	case enums.FLCOUnitToUnitVoiceChannelUser:
+		if flc.TargetAddress <= 0 {
+			return 0, 0, false
+		}
+		dst = uint(flc.TargetAddress)
+	default:
+		return 0, 0, false
+	}
+
+	return src, dst, true
+}
+
+// extractFullLCBytes builds 12 bytes of Full Link Control data
+// from the packet fields, using the dmrgo library's encoder.
+func extractFullLCBytes(pkt mmdvm.Packet) [12]byte {
+	return buildStandardLCBytes(pkt.Src, pkt.Dst, pkt.GroupCall)
+}
+
 // reverseStreamState tracks per-call state for IPSC→MMDVM translation.
 type reverseStreamState struct {
-	streamID   uint32
-	seq        uint8
-	burstIndex int  // 0-5 → A-F within a superframe
-	started    bool // whether we've seen a voice header
+	streamID          uint32
+	seq               uint8
+	burstIndex        int // 0-5 -> A-F within a superframe
+	started           bool
+	peerID            uint32
+	src               uint
+	dst               uint
+	slot              bool
+	groupCall         bool
+	lastSeen          time.Time
+	embeddedFragments [4][4]byte // pre-computed embedded LC fragments for bursts B-E
+	hasEmbeddedLC     bool       // true if embeddedFragments is valid
+}
+
+const reverseStreamReuseWindow = 1500 * time.Millisecond
+
+func (t *IPSCTranslator) findRecentReverseStream(src, dst uint, groupCall, slot bool, now time.Time) *reverseStreamState {
+	for _, rss := range t.reverseStreams {
+		if rss == nil {
+			continue
+		}
+		if rss.src != src || rss.dst != dst || rss.groupCall != groupCall || rss.slot != slot {
+			continue
+		}
+		if rss.lastSeen.IsZero() || now.Sub(rss.lastSeen) > reverseStreamReuseWindow {
+			continue
+		}
+		return rss
+	}
+	return nil
+}
+
+func (t *IPSCTranslator) findRecentReverseStreamByPeer(peerID uint32, groupCall, slot bool, now time.Time) *reverseStreamState {
+	for _, rss := range t.reverseStreams {
+		if rss == nil {
+			continue
+		}
+		if rss.peerID != peerID || rss.groupCall != groupCall || rss.slot != slot {
+			continue
+		}
+		if rss.lastSeen.IsZero() || now.Sub(rss.lastSeen) > reverseStreamReuseWindow {
+			continue
+		}
+		return rss
+	}
+	return nil
+}
+
+func (t *IPSCTranslator) removeReverseStreamAliases(target *reverseStreamState) {
+	if target == nil {
+		return
+	}
+	for key, rss := range t.reverseStreams {
+		if rss == target {
+			delete(t.reverseStreams, key)
+		}
+	}
+	if t.metrics != nil {
+		t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
+	}
 }
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
@@ -513,12 +709,22 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 	}
 
 	// Parse the IPSC header
+	peerID := binary.BigEndian.Uint32(data[1:5])
 	src := uint(data[6])<<16 | uint(data[7])<<8 | uint(data[8])
 	dst := uint(data[9])<<16 | uint(data[10])<<8 | uint(data[11])
 	groupCall := packetType == 0x80 || packetType == 0x83
 	callInfo := data[17]
 	slot := (callInfo & 0x20) != 0 // true = TS2
 	isEnd := (callInfo & 0x40) != 0
+
+	// Determine what kind of IPSC burst this is from byte 30
+	burstType := data[30]
+	hasTrustedLCAddresses := false
+	if lcSrc, lcDst, ok := recoverAddressesFromFullLC(data, burstType); ok {
+		src = lcSrc
+		dst = lcDst
+		hasTrustedLCAddresses = true
+	}
 
 	slog.Debug("IPSCTranslator: TranslateToMMDVM",
 		"packetType", fmt.Sprintf("0x%02X", packetType),
@@ -527,25 +733,52 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 
 	// Use call control bytes as stream identifier
 	callControl := binary.BigEndian.Uint32(data[13:17])
+	now := time.Now()
 
 	// Get or create reverse stream state
 	rss, ok := t.reverseStreams[callControl]
 	if !ok {
+		// Moto repeaters can drift callControl across duplicate headers and early
+		// voice bursts. Reuse a very recent stream with the same routing tuple.
+		rss = t.findRecentReverseStream(src, dst, groupCall, slot, now)
+		if rss == nil && !hasTrustedLCAddresses && burstType != ipscBurstVoiceHead {
+			// Some repeaters also drift src/dst bytes inside the transport header
+			// while the actual call on the same peer/slot is still in progress.
+			// Do not apply this fallback to a fresh voice header that already
+			// carries a decodable Full LC, otherwise a new call can inherit the
+			// previous call's src/dst for a short reuse window.
+			rss = t.findRecentReverseStreamByPeer(peerID, groupCall, slot, now)
+		}
+		if rss != nil {
+			t.reverseStreams[callControl] = rss
+		}
+	}
+	if rss == nil {
 		t.nextStreamID++
 		if t.nextStreamID == 0 {
 			t.nextStreamID = 1
 		}
 		rss = &reverseStreamState{
-			streamID: t.nextStreamID,
+			streamID:  t.nextStreamID,
+			peerID:    peerID,
+			src:       src,
+			dst:       dst,
+			slot:      slot,
+			groupCall: groupCall,
+			lastSeen:  now,
 		}
 		t.reverseStreams[callControl] = rss
 		if t.metrics != nil {
 			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Inc()
 		}
 	}
-
-	// Determine what kind of IPSC burst this is from byte 30
-	burstType := data[30]
+	if rss.src != 0 {
+		src = rss.src
+	}
+	if rss.dst != 0 {
+		dst = rss.dst
+	}
+	rss.lastSeen = now
 
 	var results []mmdvm.Packet
 
@@ -558,19 +791,27 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 			results = append(results, pkt)
 			rss.started = true
 			rss.burstIndex = 0
+			// Pre-compute embedded LC fragments from the Full LC so that
+			// voice bursts B-E carry consistent embedded signalling even
+			// when the IPSC packet lacks trailing embedded data.
+			rss.embeddedFragments = encodeEmbeddedLC(src, dst, groupCall)
+			rss.hasEmbeddedLC = true
 		}
 		// Skip duplicate headers
 
 	case ipscBurstVoiceTerm:
+		// Some repeater variants can emit burst type 0x02 without indicating
+		// a real call end in callInfo. Only treat it as terminator when end
+		// flag is present; otherwise keep the stream alive.
+		if !isEnd {
+			break
+		}
 		// Voice Terminator
 		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
 			elements.DataTypeTerminatorWithLC, data)
 		results = append(results, pkt)
 		// Clean up
-		delete(t.reverseStreams, callControl)
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
-		}
+		t.removeReverseStreamAliases(rss)
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
@@ -602,13 +843,9 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 		}
 	}
 
-	if isEnd && burstType != ipscBurstVoiceTerm {
-		// End flag set but not a terminator — clean up anyway
-		delete(t.reverseStreams, callControl)
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
-		}
-	}
+	// Some Moto implementations may set callInfo bits differently from the
+	// upstream bridge assumptions. Only explicit terminator bursts should end
+	// a reverse stream; otherwise we can split one call into many streams.
 
 	if t.metrics != nil && len(results) > 0 {
 		t.metrics.TranslatorPackets.WithLabelValues("ipsc_to_mmdvm").Add(float64(len(results)))
@@ -640,35 +877,28 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	}
 	rss.seq++
 
-	// Extract payload bytes from IPSC packet (bytes 38-49 = 12 bytes)
 	var lcBytes [12]byte
 	if len(ipscData) >= 50 {
+		// Prefer the Moto/IPSC payload as-is when building the outbound MMDVM
+		// data burst. Some BM paths appear to depend on the original radio LC
+		// bytes rather than a reconstructed standards-compliant variant.
 		copy(lcBytes[:], ipscData[38:50])
 	} else {
-		// Construct from packet fields
-		lcBytes[1] = 0x00
-		lcBytes[2] = 0x20
-		lcBytes[3] = byte(dst >> 16)
-		lcBytes[4] = byte(dst >> 8)
-		lcBytes[5] = byte(dst)
-		lcBytes[6] = byte(src >> 16)
-		lcBytes[7] = byte(src >> 8)
-		lcBytes[8] = byte(src)
+		lcBytes = buildStandardLCBytes(src, dst, groupCall)
 	}
 
-	// For voice LC headers and terminators, override the FLCO byte to match
-	// the group/private flag from the IPSC packet type.
-	if dataType == elements.DataTypeVoiceLCHeader || dataType == elements.DataTypeTerminatorWithLC {
+	// When we had to synthesize the LC bytes, ensure the call type matches
+	// the routing tuple.
+	if len(ipscData) < 50 && (dataType == elements.DataTypeVoiceLCHeader || dataType == elements.DataTypeTerminatorWithLC) {
 		if groupCall {
 			lcBytes[0] = byte(enums.FLCOGroupVoiceChannelUser)
 		} else {
 			lcBytes[0] = byte(enums.FLCOUnitToUnitVoiceChannelUser)
 		}
 	}
-	// For CSBK/data types, preserve the payload bytes as-is from the radio
 
-	// Build the 33-byte DMR data burst
-	pkt.DMRData = layer2.BuildLCDataBurst(lcBytes, dataType, 0)
+	// Build the 33-byte DMR data burst using correct BPTC(196,96).
+	pkt.DMRData = bptc.BuildLCDataBurst(lcBytes, uint8(dataType), t.colorCode)
 
 	return pkt
 }
@@ -724,8 +954,9 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 			burst.VoiceBurst = enums.VoiceBurstF
 		}
 
-		// Extract embedded signalling from the IPSC packet if available
-		t.populateEmbeddedSignalling(&burst, burstIdx, ipscData)
+		// Extract embedded signalling from the IPSC packet if available,
+		// falling back to pre-computed fragments from the Full LC header.
+		t.populateEmbeddedSignalling(&burst, burstIdx, ipscData, rss)
 	}
 
 	_ = voiceBits // voiceBits used internally by burst.Encode() via vc
@@ -763,11 +994,12 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 }
 
 // populateEmbeddedSignalling fills in the embedded signalling fields
-// for voice bursts B-F from the IPSC packet's trailing data.
-func (t *IPSCTranslator) populateEmbeddedSignalling(burst *layer2.Burst, burstIdx int, ipscData []byte) {
-	// Set up a basic embedded signalling with color code 0
+// for voice bursts B-F. Prefer the raw Moto/IPSC embedded bytes first and
+// only fall back to header-derived fragments when the burst does not carry
+// usable trailing embedded signalling bytes.
+func (t *IPSCTranslator) populateEmbeddedSignalling(burst *layer2.Burst, burstIdx int, ipscData []byte, rss *reverseStreamState) {
 	burst.EmbeddedSignalling = pdu.EmbeddedSignalling{
-		ColorCode:                          0,
+		ColorCode:                          int(t.colorCode),
 		PreemptionAndPowerControlIndicator: false,
 		LCSS:                               enums.ContinuationFragmentLCorCSBK,
 		ParityOK:                           true,
@@ -783,20 +1015,159 @@ func (t *IPSCTranslator) populateEmbeddedSignalling(burst *layer2.Burst, burstId
 		burst.EmbeddedSignalling.LCSS = enums.ContinuationFragmentLCorCSBK
 	}
 
-	// Extract embedded data from trailing bytes if present
+	// Prefer raw IPSC trailing bytes first.
 	var embBytes []byte
 	switch len(ipscData) {
 	case 57: // Bursts B, C, D, F — 5 bytes of embedded data at [52:57]
 		embBytes = ipscData[52:57]
 	case 66: // Burst E — embedded data at [52:59]
 		embBytes = ipscData[52:59]
-	default:
-		// No embedded data available
-		return
 	}
 
-	// Unpack embedded data bytes into 32-bit array
 	if len(embBytes) >= 4 {
-		burst.UnpackEmbeddedSignallingData(embBytes)
+		candidate := embBytes[:4]
+		nonZero := false
+		for _, b := range candidate {
+			if b != 0x00 {
+				nonZero = true
+				break
+			}
+		}
+		if nonZero {
+			burst.UnpackEmbeddedSignallingData(candidate)
+			return
+		}
+		streamID := uint32(0)
+		src := uint(0)
+		dst := uint(0)
+		if rss != nil {
+			streamID = rss.streamID
+			src = rss.src
+			dst = rss.dst
+		}
+		slog.Debug("IPSCTranslator: zero trailing embedded bytes, falling back to reconstructed embedded LC",
+			"burstIdx", burstIdx,
+			"streamID", streamID,
+			"src", src,
+			"dst", dst,
+			"packetLen", len(ipscData))
 	}
+
+	// Fall back to pre-computed embedded LC fragments from the header when
+	// the repeater does not provide usable trailing embedded bytes.
+	if rss != nil && rss.hasEmbeddedLC {
+		fragIdx := burstIdx - 1
+		if fragIdx < 0 || fragIdx > 3 {
+			fragIdx = 0
+		}
+		burst.UnpackEmbeddedSignallingData(rss.embeddedFragments[fragIdx][:])
+	}
+}
+
+// encodeEmbeddedLC computes the 4 embedded LC fragments (each 4 bytes / 32 bits)
+// from the call addressing fields.  The encoding follows ETSI TS 102 361-1
+// Annex B.2 (variable-length BPTC for embedded signalling):
+//
+//  1. Build 72-bit LC: FLCO(8) + FID(8) + SO(8) + Dst(24) + Src(24)
+//  2. Compute 5-bit CRC → 77 info bits
+//  3. Place into 8×16 BPTC matrix (7 data rows + 1 column-parity row,
+//     each row protected by Hamming(16,11,4))
+//  4. Read out column-wise into 4 fragments of 32 bits
+func encodeEmbeddedLC(src, dst uint, groupCall bool) [4][4]byte {
+	// --- Step 1: build 9-byte (72-bit) LC ---
+	var lc [9]byte
+	if groupCall {
+		lc[0] = 0x00 // FLCO = Group Voice Channel User
+	} else {
+		lc[0] = 0x03 // FLCO = Unit to Unit Voice Channel User
+	}
+	lc[1] = 0x00 // FID = Standard
+	lc[2] = 0x20 // Service Options (default)
+	lc[3] = byte(dst >> 16)
+	lc[4] = byte(dst >> 8)
+	lc[5] = byte(dst)
+	lc[6] = byte(src >> 16)
+	lc[7] = byte(src >> 8)
+	lc[8] = byte(src)
+
+	// --- Step 2: convert to 72 bits and compute 5-bit CRC ---
+	var bits [77]byte
+	for i := range 9 {
+		for j := range 8 {
+			bits[i*8+j] = (lc[i] >> (7 - j)) & 1
+		}
+	}
+	crc := embeddedLCCRC5(bits[:72])
+	for i := range 5 {
+		bits[72+i] = (crc >> (4 - i)) & 1
+	}
+
+	// --- Step 3: build 8×16 BPTC matrix ---
+	var matrix [8][16]byte
+
+	// Rows 0-6: 11 data bits each (7 × 11 = 77)
+	idx := 0
+	for r := range 7 {
+		for c := range 11 {
+			matrix[r][c] = bits[idx]
+			idx++
+		}
+	}
+
+	// Row 7: column parity (even parity over rows 0-6)
+	for c := range 11 {
+		p := byte(0)
+		for r := range 7 {
+			p ^= matrix[r][c]
+		}
+		matrix[7][c] = p
+	}
+
+	// Hamming(16,11,4) parity for each row — uses the same generator
+	// as BPTC(196,96) row parity plus an overall parity bit.
+	for r := range 8 {
+		d := matrix[r][:11]
+		matrix[r][11] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[5] ^ d[7] ^ d[8]
+		matrix[r][12] = d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[6] ^ d[8] ^ d[9]
+		matrix[r][13] = d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[7] ^ d[9] ^ d[10]
+		matrix[r][14] = d[0] ^ d[1] ^ d[2] ^ d[4] ^ d[6] ^ d[7] ^ d[10]
+		// Column 15: overall row parity (Hamming SEC-DED extension)
+		p := byte(0)
+		for c := range 15 {
+			p ^= matrix[r][c]
+		}
+		matrix[r][15] = p
+	}
+
+	// --- Step 4: read column-wise into 4 packed fragments ---
+	// Fragment f covers columns [f*4 .. f*4+3], each column has 8 rows.
+	var fragments [4][4]byte
+	for f := range 4 {
+		bitIdx := 0
+		for c := 0; c < 4; c++ {
+			for r := 0; r < 8; r++ {
+				if matrix[r][f*4+c] == 1 {
+					fragments[f][bitIdx/8] |= 1 << (7 - (bitIdx % 8))
+				}
+				bitIdx++
+			}
+		}
+	}
+	return fragments
+}
+
+// embeddedLCCRC5 computes the 5-bit CRC for the embedded LC per
+// ETSI TS 102 361-1 B.3.11.  Generator polynomial:
+// G(x) = x^5 + x^4 + x^2 + 1  (0x15 with MSB implicit).
+func embeddedLCCRC5(bits []byte) byte {
+	var reg byte
+	for _, bit := range bits {
+		msb := (reg >> 4) & 1
+		reg = ((reg << 1) & 0x1F) | (bit & 1)
+		if msb == 1 {
+			reg ^= 0x15
+		}
+	}
+	// ETSI TS 102 361-1 B.3.11: final inversion (XOR with all ones)
+	return (reg & 0x1F) ^ 0x1F
 }

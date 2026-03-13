@@ -1,19 +1,46 @@
 log-level: info
+display-ip: "10.10.250.1"    # shared display IP in web runtime info (IPSC + Hytera)
 
 ipsc:
-  interface: "ipsc0"
-  port: 50000
-  ip: "10.10.250.1"
-  subnet-mask: 24
+  enabled: true
+  port: 50005               # moto IPSC port
   auth:
     enabled: false
     key: ""
+
+hytera:
+  enabled: true
+  p2p-port: 50000
+  dmr-port: 50001
+  rdac-port: 50002
+  enable-rdac: false
 
 metrics:
   enabled: false
   address: ":9100"
 
-mmdvm:
+dmrid-db:
+  path: "dmrid.csv"
+
+storage:
+  path: "ipsc2mmdvm.db"
+
+web:
+  enabled: true
+  address: ":9201"
+  session-secret: "change-me"
+  bootstrap-admin:
+    username: "admin"
+    callsign: "N0ADM"
+    email: "admin@example.com"
+    password: "change-me-now"
+
+local:
+  id: 9000000
+  callsign: "IPSC2MMDVM"
+  color-code: 1
+
+mmdvm-client:
   - name: "BrandMeister"
     master-server: "3104.master.brandmeister.network:62031"
     password: "passw0rd"
@@ -92,3 +119,13 @@ mmdvm:
   #       to-slot: 2
   #       to-tg: 31665
   #       range: 1
+
+mmdvm-server:
+  # Example of accepting an inbound MMDVM hotspot/client:
+  # - name: "LocalHotspot"
+  #   listen: ":62031"
+  #   password: "anotherpassword"
+  #   # Listener entries are only used to define the local server.
+  #   # Connected MMDVM boxes self-register their own callsign, DMRID,
+  #   # model and RF metadata, and the program stores them in SQLite.
+  #   pass-all-tg: [1, 2]
