@@ -306,6 +306,36 @@ function isHyteraDevice(device) {
   return protocol === 'hytera' || sourceKey.startsWith('hytera:')
 }
 
+function deviceExtra(device) {
+  const raw = String(device?.extraJson || '').trim()
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function deviceSecondaryInfo(device) {
+  const items = []
+  if (isAdmin.value) {
+    const address = isHyteraDevice(device) ? (device?.ip || '-') : deviceAddress(device)
+    items.push(`${t('device.address')} ${address}`)
+  }
+  if (isHyteraDevice(device)) {
+    const extra = deviceExtra(device)
+    items.push(`Hytera P2P ${extra?.p2pPort || '-'}`)
+    items.push(`Hytera DMR ${extra?.dmrPort || device?.port || '-'}`)
+    items.push(`Hytera RDAC ${extra?.rdacPort || '-'}`)
+    items.push(`${t('device.nrlServerAddr')} ${device?.nrlServerAddr || '-'}`)
+    items.push(`${t('device.nrlServerPort')} ${device?.nrlServerPort || '-'}`)
+    items.push(`${t('device.nrlSsid')} ${device?.nrlSsid || '-'}`)
+    items.push(`${t('device.nrlUdpPort')} ${device?.nrlUdpPort || '-'}`)
+  }
+  return items
+}
+
 function makeDeviceDraft(device) {
   return {
     name: device.name || '',
@@ -944,7 +974,7 @@ onUnmounted(() => {
               <div class="device-mobile-head device-list-head">
                 <div>
                   <strong>{{ device.name || device.sourceKey }}</strong>
-                  <p class="muted-inline">{{ device.callsign || '-' }} · {{ device.protocol || '-' }}</p>
+                  <p class="muted-inline">{{ device.callsign || '-' }} · {{ device.dmrid || '-' }} · {{ device.protocol || '-' }}</p>
                 </div>
                 <div class="device-head-side">
                   <span :class="['table-status', { online: device.online }]">{{ device.online ? t('call.online') : t('call.offline') }}</span>
@@ -955,16 +985,16 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="device-info-grid">
-                <div class="kv-row"><span>{{ t('device.dmrid') }}</span><strong>{{ device.dmrid || '-' }}</strong></div>
-                <div v-if="isAdmin" class="kv-row"><span>{{ t('device.address') }}</span><strong>{{ deviceAddress(device) }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
                 <div class="kv-row"><span>TS1 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'static') }}</strong></div>
                 <div class="kv-row"><span>TS1 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'dynamic') }}</strong></div>
                 <div class="kv-row"><span>TS2 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'static') }}</strong></div>
                 <div class="kv-row"><span>TS2 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'dynamic') }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.description') }}</span><strong>{{ device.description || '-' }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
                 <div class="kv-row"><span>{{ t('device.notes') }}</span><strong>{{ device.notes || '-' }}</strong></div>
+              </div>
+              <div class="device-card-footer">
+                <span v-for="item in deviceSecondaryInfo(device)" :key="item" class="muted-inline">{{ item }}</span>
               </div>
               <div v-if="canEditDevice(device) || isAdmin" class="account-actions device-actions-bottom">
                 <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
@@ -1168,10 +1198,6 @@ onUnmounted(() => {
                 <h3>{{ t('device.notes') }}</h3>
               </div>
               <div class="device-editor-section-grid">
-                <label class="field-block field-span-2">
-                  <span>{{ t('device.description') }}</span>
-                  <textarea v-model="deviceDrafts[editingDevice.id].description" rows="3" :placeholder="t('device.description')"></textarea>
-                </label>
                 <label class="field-block field-span-2">
                   <span>{{ t('device.notes') }}</span>
                   <textarea v-model="deviceDrafts[editingDevice.id].notes" rows="3" :placeholder="t('device.notes')"></textarea>

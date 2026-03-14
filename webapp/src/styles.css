@@ -42,8 +42,7 @@ body::before {
     linear-gradient(to bottom, transparent 0 23px, rgba(115, 220, 255, 0.05) 24px),
     linear-gradient(180deg, transparent, var(--scanline) 45%, transparent);
   background-size: 24px 24px, 24px 24px, 100% 8px;
-  mix-blend-mode: screen;
-  opacity: 0.2;
+  opacity: 0.12;
   z-index: -1;
 }
 
@@ -70,10 +69,10 @@ button, input, textarea, select {
   inset: auto;
   width: 34vw;
   height: 34vw;
-  filter: blur(48px);
+  filter: blur(28px);
   pointer-events: none;
-  opacity: 0.45;
-  animation: drift 11s ease-in-out infinite alternate;
+  opacity: 0.22;
+  animation: drift 18s ease-in-out infinite alternate;
 }
 
 .aurora-a {
@@ -94,7 +93,8 @@ button, input, textarea, select {
   border: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(12, 22, 47, 0.82), rgba(4, 10, 23, 0.82));
   box-shadow: var(--shadow);
-  backdrop-filter: blur(22px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   overflow: hidden;
 }
 
@@ -388,7 +388,7 @@ select:focus {
 
 .content-scroll {
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
 }
 
 .content-overview,
@@ -433,9 +433,24 @@ select:focus {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+@media (max-width: 1500px) {
+  .device-list-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .device-mobile-card,
 .device-list-card {
   padding: 18px;
+}
+
+.metric-card,
+.device-list-card,
+.account-card,
+.my-device-card,
+.call-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 320px;
 }
 
 .device-mobile-head {
@@ -469,6 +484,14 @@ select:focus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.device-card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 12px;
+  font-size: 11px;
 }
 
 .table-status {
@@ -1109,6 +1132,10 @@ select:focus {
   scrollbar-color: rgba(111, 247, 215, 0.82) var(--scroll-track);
 }
 
+.content-scroll {
+  scrollbar-color: rgba(111, 247, 215, 0.78) transparent;
+}
+
 .sidebar::-webkit-scrollbar,
 .content-scroll::-webkit-scrollbar,
 .call-mini-list::-webkit-scrollbar,
@@ -1128,6 +1155,11 @@ select:focus {
   background: var(--scroll-track);
   border-radius: 999px;
   border: 1px solid rgba(111, 247, 215, 0.12);
+}
+
+.content-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  border: none;
 }
 
 .sidebar::-webkit-scrollbar-thumb,
@@ -1543,6 +1575,16 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .device-info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .device-info-grid .kv-row {
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+  }
+
   .device-editor-section-grid {
     grid-template-columns: 1fr;
   }
@@ -1568,8 +1610,7 @@ select:focus {
     align-items: flex-start;
   }
 
-  .device-list-grid,
-  .device-info-grid {
+  .device-list-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1640,6 +1681,17 @@ select:focus {
 
   .content.content-overview {
     padding: 0;
+  }
+
+  .device-info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .device-info-grid .kv-row {
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
   }
 
   .audio-target-list {
