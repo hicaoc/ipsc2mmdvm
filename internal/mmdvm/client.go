@@ -400,7 +400,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 		}
 	case "RPTS":
 		if len(data) >= 7 && string(data[:7]) == "RPTSBKN" {
-			slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
+			slog.Debug("Server requested a roaming beacon transmission", "network", h.cfg.Name)
 		}
 	case "DMRD":
 		packet, ok := proto.Decode(data)

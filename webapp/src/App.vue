@@ -12,6 +12,7 @@ const activePanel = ref('overview')
 const authMode = ref('login')
 const authOpen = ref(false)
 const deviceEditorOpen = ref(false)
+const accountCreatorOpen = ref(false)
 const editingDeviceId = ref(null)
 const authForm = ref({ username: '', callsign: '', email: '', password: '' })
 const authConfirmPassword = ref('')
@@ -23,6 +24,7 @@ const busy = ref(false)
 const message = ref('')
 const nowTick = ref(Date.now())
 const wsConnected = ref(false)
+const deviceSearch = ref('')
 
 let snapshotIntervalId = null
 let durationIntervalId = null
@@ -41,6 +43,8 @@ const myDevices = computed(() => {
   if (!callsign) return []
   return sortedDevices.value.filter((device) => normalizeCallsign(device.callsign) === callsign)
 })
+const filteredDevices = computed(() => filterDevices(sortedDevices.value, deviceSearch.value))
+const filteredMyDevices = computed(() => filterDevices(myDevices.value, deviceSearch.value))
 const editingDevice = computed(() =>
   sortedDevices.value.find((device) => device.id === editingDeviceId.value) || null
 )
@@ -52,7 +56,6 @@ const sortedCalls = computed(() =>
   })
 )
 const activeCalls = computed(() => sortedCalls.value.filter((call) => isActiveCall(call)))
-const recentHistoryCalls = computed(() => sortedCalls.value.filter((call) => !isActiveCall(call)))
 const liveHeadlineCall = computed(() => activeCalls.value[0] || null)
 const overviewCalls = computed(() => sortedCalls.value)
 const navItems = computed(() => {
@@ -141,6 +144,62 @@ function callTitle(call) {
 
 function callSourceDevice(call) {
   return call?.sourceName || '-'
+}
+
+function deviceAddress(device) {
+  if (!device?.ip) return '-'
+  return device.port ? `${device.ip}:${device.port}` : device.ip
+}
+
+function splitHostPort(value) {
+  const raw = String(value || '').trim()
+  if (!raw || raw === '-') return { host: '-', port: '-' }
+  const withoutProtocol = raw.replace(/^[a-z]+:\/\//i, '')
+  const withoutPath = withoutProtocol.split('/')[0]
+  const lastColon = withoutPath.lastIndexOf(':')
+  if (lastColon <= 0 || lastColon === withoutPath.length - 1) {
+    return { host: withoutPath || '-', port: '-' }
+  }
+  return {
+    host: withoutPath.slice(0, lastColon) || '-',
+    port: withoutPath.slice(lastColon + 1) || '-'
+  }
+}
+
+function runtimeHost(value) {
+  return splitHostPort(value).host
+}
+
+function runtimePort(value) {
+  return splitHostPort(value).port
+}
+
+const runtimePrimaryHost = computed(() => {
+  const candidates = [
+    snapshot.value.runtime?.ipscListen,
+    snapshot.value.runtime?.hyteraP2pListen,
+    snapshot.value.runtime?.hyteraDmrListen,
+    snapshot.value.runtime?.hyteraRdacListen
+  ]
+  for (const item of candidates) {
+    const host = runtimeHost(item)
+    if (host && host !== '-') return host
+  }
+  return '-'
+})
+
+function filterDevices(devices, query) {
+  const keyword = String(query || '').trim().toLowerCase()
+  if (!keyword) return devices
+  return devices.filter((device) => {
+    const fields = [
+      device?.name,
+      device?.sourceKey,
+      device?.callsign,
+      device?.dmrid ? String(device.dmrid) : ''
+    ]
+    return fields.some((value) => String(value || '').toLowerCase().includes(keyword))
+  })
 }
 
 function callTypeLabel(call) {
@@ -466,6 +525,10 @@ function openDeviceEditor(device) {
   deviceEditorOpen.value = true
 }
 
+function openAccountCreator() {
+  accountCreatorOpen.value = true
+}
+
 function parseGroups(value) {
   return String(value || '')
     .split(/[\s,]+/)
@@ -543,221 +606,160 @@ onUnmounted(() => {
 
     <section class="workspace">
       <aside class="sidebar glass">
-        <button v-for="item in navItems" :key="item.key" :class="{ active: activePanel === item.key }" @click="activePanel = item.key">
-          {{ item.label }}
-        </button>
+        <div class="sidebar-head">
+          <p class="eyebrow">{{ t('dashboard.welcome') }}</p>
+          <strong>{{ user ? `${user.username} / ${user.callsign || '-'}` : t('app.title') }}</strong>
+          <span class="muted-inline">{{ wsConnected ? t('call.wsOnline') : t('call.wsOffline') }}</span>
+        </div>
+        <nav class="sidebar-nav" :aria-label="t('app.overview')">
+          <button v-for="item in navItems" :key="item.key" :class="{ active: activePanel === item.key }" @click="activePanel = item.key">
+            {{ item.label }}
+          </button>
+        </nav>
+        <article class="glass inset runtime-card runtime-panel runtime-panel-sidebar">
+          <div class="section-head runtime-panel-head">
+            <h3>{{ t('dashboard.systemInfo') }}</h3>
+          </div>
+          <div class="kv-list compact runtime-kv-list runtime-kv-list-sidebar">
+            <div class="kv-row"><span>IP</span><strong>{{ runtimePrimaryHost }}</strong></div>
+            <div class="kv-row"><span>IPSC</span><strong>{{ runtimePort(snapshot.runtime.ipscListen) }}</strong></div>
+            <div class="kv-row"><span>P2P</span><strong>{{ runtimePort(snapshot.runtime.hyteraP2pListen) }}</strong></div>
+            <div class="kv-row"><span>DMR</span><strong>{{ runtimePort(snapshot.runtime.hyteraDmrListen) }}</strong></div>
+            <div class="kv-row"><span>RDAC</span><strong>{{ runtimePort(snapshot.runtime.hyteraRdacListen) }}</strong></div>
+          </div>
+        </article>
       </aside>
 
       <main
         :class="[
           'content',
-          'glass',
           {
+            'content-shell': activePanel !== 'overview',
             'content-scroll': ['devices', 'accounts', 'my-devices'].includes(activePanel),
-            'content-overview': activePanel === 'overview',
-            'content-calls': activePanel === 'calls'
+            'content-overview': activePanel === 'overview'
           }
         ]"
       >
         <template v-if="activePanel === 'overview'">
-          <section class="overview-panel">
-            <div class="section-head">
-              <h2>{{ t('app.overview') }}</h2>
+          <article class="glass inset runtime-card call-focus-panel">
+            <div class="call-panel-head">
+              <div>
+                <h3>{{ t('app.calls') }}</h3>
+                <p class="hint">{{ t('call.priorityHint') }}</p>
+              </div>
+              <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
             </div>
-            <div class="overview-grid">
-              <article class="glass inset runtime-card call-focus-panel">
-                <div class="call-panel-head">
-                  <div>
-                    <h3>{{ t('app.calls') }}</h3>
-                    <p class="hint">{{ t('call.priorityHint') }}</p>
-                  </div>
-                  <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
+            <article v-if="liveHeadlineCall" class="call-hero live">
+              <div class="call-hero-top">
+                <div class="call-primary">
+                  <span class="pulse-dot"></span>
+                  <strong>{{ callTitle(liveHeadlineCall) }}</strong>
+                  <span class="voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
                 </div>
-                <article v-if="liveHeadlineCall" class="call-hero live">
-                  <div class="call-hero-top">
-                    <div class="call-primary">
-                      <span class="pulse-dot"></span>
-                      <strong>{{ callTitle(liveHeadlineCall) }}</strong>
-                      <span class="voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                    </div>
-                    <span class="call-status-badge live">{{ t('call.live') }}</span>
-                  </div>
-                  <div class="call-hero-body">
-                    <strong class="call-hero-duration">{{ fmtDuration(liveHeadlineCall) }}</strong>
-                    <div class="call-hero-meta">
-                      <span>TG {{ liveHeadlineCall.dstId || '-' }}</span>
-                      <span>TS{{ liveHeadlineCall.slot || '-' }}</span>
-                      <span>{{ t('call.callsign') }} {{ liveHeadlineCall.sourceCallsign || '-' }}</span>
-                      <span>{{ callSourceDevice(liveHeadlineCall) }}</span>
-                      <span>{{ t('call.dmrid') }} {{ liveHeadlineCall.sourceDmrid || '-' }}</span>
-                      <span>{{ fmtTime(liveHeadlineCall.createdAt) }}</span>
-                    </div>
-                  </div>
-                </article>
-                <div class="call-mini-list">
-                  <article
-                    v-for="call in overviewCalls"
-                    :key="call.id"
-                    :class="['call-card', { live: isActiveCall(call) }]"
-                  >
-                    <div class="call-card-inline">
-                      <div class="call-primary">
-                        <span v-if="isActiveCall(call)" class="pulse-dot"></span>
-                        <strong>{{ callTitle(call) }}</strong>
-                      </div>
-                      <div class="call-card-meta call-card-meta-inline">
-                        <span :class="['call-status-badge', { live: isActiveCall(call) }]">{{ callStatusLabel(call) }}</span>
-                        <span>{{ call.dstId || '-' }}</span>
-                        <span>TS{{ call.slot || '-' }}</span>
-                        <span>{{ call.sourceCallsign || '-' }}</span>
-                        <span>{{ callSourceDevice(call) }}</span>
-                        <span>{{ call.sourceDmrid || '-' }}</span>
-                        <span>{{ fmtDuration(call) }}</span>
-                        <span>{{ fmtTime(call.createdAt) }}</span>
-                      </div>
-                    </div>
-                  </article>
-                  <div v-if="!overviewCalls.length" class="hint">{{ t('call.empty') }}</div>
-                </div>
-              </article>
-
-              <article class="glass inset runtime-card runtime-panel">
-                <h3>{{ t('dashboard.systemInfo') }}</h3>
-                <div class="kv-list compact">
-                  <div class="kv-row"><span>URL</span><strong>{{ snapshot.runtime.accessUrl || '-' }}</strong></div>
-                  <div class="kv-row"><span>IPSC</span><strong>{{ snapshot.runtime.ipscListen || '-' }}</strong></div>
-                  <div class="kv-row"><span>Hytera P2P</span><strong>{{ snapshot.runtime.hyteraP2pListen || '-' }}</strong></div>
-                  <div class="kv-row"><span>Hytera DMR</span><strong>{{ snapshot.runtime.hyteraDmrListen || '-' }}</strong></div>
-                  <div class="kv-row"><span>Hytera RDAC</span><strong>{{ snapshot.runtime.hyteraRdacListen || '-' }}</strong></div>
-                </div>
-              </article>
-            </div>
-          </section>
-        </template>
-
-        <template v-else-if="activePanel === 'calls'">
-          <section class="calls-panel">
-            <div class="section-head">
-              <h2>{{ t('app.calls') }}</h2>
-              <span class="muted-inline">{{ activeCalls.length }} {{ t('call.live') }}</span>
-            </div>
-            <section v-if="activeCalls.length" class="live-call-band">
-              <article v-for="call in activeCalls" :key="call.id" class="call-hero live compact">
-                <div class="call-hero-top">
-                  <div class="call-primary">
-                    <span class="pulse-dot"></span>
-                    <strong>{{ callTitle(call) }}</strong>
-                    <span class="voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                  </div>
-                  <strong class="call-hero-duration">{{ fmtDuration(call) }}</strong>
-                </div>
+                <span class="call-status-badge live">{{ t('call.live') }}</span>
+              </div>
+              <div class="call-hero-body">
+                <strong class="call-hero-duration">{{ fmtDuration(liveHeadlineCall) }}</strong>
                 <div class="call-hero-meta">
-                  <span>{{ callTypeLabel(call) }}</span>
-                  <span>TG {{ call.dstId || '-' }}</span>
-                  <span>TS{{ call.slot || '-' }}</span>
-                  <span>{{ t('call.callsign') }} {{ call.sourceCallsign || '-' }}</span>
-                  <span>{{ callSourceDevice(call) }}</span>
-                  <span>{{ t('call.dmrid') }} {{ call.sourceDmrid || '-' }}</span>
-                  <span>{{ fmtTime(call.createdAt) }}</span>
+                  <span>TG {{ liveHeadlineCall.dstId || '-' }}</span>
+                  <span>TS{{ liveHeadlineCall.slot || '-' }}</span>
+                  <span>{{ t('call.callsign') }} {{ liveHeadlineCall.sourceCallsign || '-' }}</span>
+                  <span>{{ callSourceDevice(liveHeadlineCall) }}</span>
+                  <span>{{ t('call.dmrid') }} {{ liveHeadlineCall.sourceDmrid || '-' }}</span>
+                  <span>{{ fmtTime(liveHeadlineCall.createdAt) }}</span>
                 </div>
-              </article>
-            </section>
-            <div class="call-table">
+              </div>
+            </article>
+            <div class="call-mini-list">
               <article
-                v-for="call in recentHistoryCalls"
+                v-for="call in overviewCalls"
                 :key="call.id"
-                :class="['call-card', 'call-card-detailed', { live: isActiveCall(call) }]"
+                :class="['call-card', { live: isActiveCall(call) }]"
               >
-                <div class="call-card-top">
+                <div class="call-card-compact-head">
                   <div class="call-primary">
                     <span v-if="isActiveCall(call)" class="pulse-dot"></span>
                     <strong>{{ callTitle(call) }}</strong>
                   </div>
-                  <div class="call-card-side">
+                  <div class="call-card-compact-side">
                     <span :class="['call-status-badge', { live: isActiveCall(call) }]">{{ callStatusLabel(call) }}</span>
-                    <strong class="call-duration">{{ fmtDuration(call) }}</strong>
+                    <strong class="call-card-compact-duration">{{ fmtDuration(call) }}</strong>
                   </div>
                 </div>
-                <div class="call-card-grid">
-                  <div class="call-field"><span>{{ t('call.target') }}</span><strong>TG {{ call.dstId || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.slot') }}</span><strong>TS{{ call.slot || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.startedAt') }}</span><strong>{{ fmtTime(call.createdAt) }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.type') }}</span><strong>{{ callTypeLabel(call) }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.dmrid') }}</span><strong>{{ call.sourceDmrid || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.sourceId') }}</span><strong>{{ call.srcId || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.callsign') }}</span><strong>{{ call.sourceCallsign || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.sourceDevice') }}</span><strong>{{ call.sourceName || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.frontend') }}</span><strong>{{ call.frontend || '-' }}</strong></div>
-                  <div class="call-field"><span>{{ t('call.stream') }}</span><strong>{{ call.streamId || '-' }}</strong></div>
-                  <div class="call-field call-field-wide"><span>{{ t('call.address') }}</span><strong>{{ call.fromIp || '-' }}{{ call.fromPort ? `:${call.fromPort}` : '' }}</strong></div>
+                <div class="call-card-compact-layout">
+                  <div class="call-card-compact-grid">
+                    <div class="call-pill"><span>TG</span><strong>{{ call.dstId || '-' }}</strong></div>
+                    <div class="call-pill"><span>TS</span><strong>{{ call.slot || '-' }}</strong></div>
+                    <div class="call-pill"><span>{{ t('call.callsign') }}</span><strong>{{ call.sourceCallsign || '-' }}</strong></div>
+                    <div class="call-pill"><span>{{ t('call.sourceDevice') }}</span><strong>{{ callSourceDevice(call) }}</strong></div>
+                  </div>
+                  <div class="call-card-compact-grid call-card-compact-grid-secondary">
+                    <div class="call-pill call-pill-dmrid"><span>{{ t('call.dmrid') }}</span><strong>{{ call.sourceDmrid || '-' }}</strong></div>
+                    <div class="call-pill call-pill-started"><span>{{ t('call.startedAt') }}</span><strong>{{ fmtTime(call.createdAt) }}</strong></div>
+                  </div>
+                </div>
+                <div class="call-card-compact-footer">
+                  <span class="muted-inline">ID {{ call.srcId || '-' }}</span>
+                  <span class="muted-inline">{{ call.frontend || '-' }}</span>
+                  <span class="muted-inline">{{ call.fromIp || '-' }}{{ call.fromPort ? `:${call.fromPort}` : '' }}</span>
                 </div>
               </article>
-              <div v-if="!sortedCalls.length" class="hint">{{ t('call.empty') }}</div>
+              <div v-if="!overviewCalls.length" class="hint">{{ t('call.empty') }}</div>
             </div>
-          </section>
+          </article>
         </template>
 
         <template v-else-if="activePanel === 'devices'">
           <div class="section-head">
             <h2>{{ t('app.devices') }}</h2>
+            <input v-model="deviceSearch" class="search-input" :placeholder="t('device.searchPlaceholder')" />
           </div>
-          <div class="device-table-wrap">
-            <table class="device-table">
-              <thead>
-                <tr>
-                  <th>{{ t('device.name') }}</th>
-                  <th>{{ t('device.status') }}</th>
-                  <th>{{ t('device.callsign') }}</th>
-                  <th>{{ t('device.dmrid') }}</th>
-                  <th v-if="isAdmin">{{ t('device.address') }}</th>
-                  <th>{{ t('device.model') }}</th>
-                  <th>{{ t('device.location') }}</th>
-                  <th>TS1 {{ t('device.staticGroups') }}</th>
-                  <th>TS1 {{ t('device.dynamicGroups') }}</th>
-                  <th>TS2 {{ t('device.staticGroups') }}</th>
-                  <th>TS2 {{ t('device.dynamicGroups') }}</th>
-                  <th>{{ t('device.protocol') }}</th>
-                  <th>{{ t('device.description') }}</th>
-                  <th>{{ t('device.notes') }}</th>
-                  <th>{{ t('app.actions') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="device in sortedDevices" :key="device.id">
-                  <td>{{ device.name || device.sourceKey }}</td>
-                  <td><span :class="['table-status', { online: device.online }]">{{ device.online ? t('call.online') : t('call.offline') }}</span></td>
-                  <td>{{ device.callsign || '-' }}</td>
-                  <td>{{ device.dmrid || '-' }}</td>
-                  <td v-if="isAdmin">{{ device.ip ? `${device.ip}${device.port ? `:${device.port}` : ''}` : '-' }}</td>
-                  <td>{{ device.model || '-' }}</td>
-                  <td>{{ device.location || '-' }}</td>
-                  <td>{{ groupSummary(device.sourceKey, 1, 'static') }}</td>
-                  <td>{{ groupSummary(device.sourceKey, 1, 'dynamic') }}</td>
-                  <td>{{ groupSummary(device.sourceKey, 2, 'static') }}</td>
-                  <td>{{ groupSummary(device.sourceKey, 2, 'dynamic') }}</td>
-                  <td>{{ device.protocol || '-' }}</td>
-                  <td>{{ device.description || '-' }}</td>
-                  <td>{{ device.notes || '-' }}</td>
-                  <td>
-                    <template v-if="canEditDevice(device) || isAdmin">
-                      <button v-if="canEditDevice(device)" class="ghost" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
-                      <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
-                    </template>
-                    <span v-else class="muted-inline">-</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="device-card-list device-list-grid">
+            <article v-for="device in filteredDevices" :key="device.id" class="glass inset device-list-card">
+              <div class="device-mobile-head device-list-head">
+                <div>
+                  <strong>{{ device.name || device.sourceKey }}</strong>
+                  <p class="muted-inline">{{ device.callsign || '-' }} · {{ device.protocol || '-' }}</p>
+                </div>
+                <div class="device-head-side">
+                  <span :class="['table-status', { online: device.online }]">{{ device.online ? t('call.online') : t('call.offline') }}</span>
+                  <div v-if="canEditDevice(device) || isAdmin" class="account-actions device-actions-inline">
+                    <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
+                    <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
+                  </div>
+                </div>
+              </div>
+              <div class="device-info-grid">
+                <div class="kv-row"><span>{{ t('device.dmrid') }}</span><strong>{{ device.dmrid || '-' }}</strong></div>
+                <div v-if="isAdmin" class="kv-row"><span>{{ t('device.address') }}</span><strong>{{ deviceAddress(device) }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
+                <div class="kv-row"><span>TS1 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'static') }}</strong></div>
+                <div class="kv-row"><span>TS1 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'dynamic') }}</strong></div>
+                <div class="kv-row"><span>TS2 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'static') }}</strong></div>
+                <div class="kv-row"><span>TS2 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'dynamic') }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.description') }}</span><strong>{{ device.description || '-' }}</strong></div>
+                <div class="kv-row"><span>{{ t('device.notes') }}</span><strong>{{ device.notes || '-' }}</strong></div>
+              </div>
+              <div v-if="canEditDevice(device) || isAdmin" class="account-actions device-actions-bottom">
+                <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
+                <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
+              </div>
+            </article>
+            <div v-if="!filteredDevices.length" class="hint">{{ t('device.noSearchResults') }}</div>
           </div>
         </template>
 
         <template v-else-if="activePanel === 'my-devices'">
           <div class="section-head">
             <h2>{{ t('app.myDevices') }}</h2>
-            <span class="muted-inline">{{ t('device.myDevicesHint') }}</span>
+            <div class="section-head-side">
+              <input v-model="deviceSearch" class="search-input" :placeholder="t('device.searchPlaceholder')" />
+              <span class="muted-inline">{{ t('device.myDevicesHint') }}</span>
+            </div>
           </div>
           <div class="my-device-list">
-            <article v-for="device in myDevices" :key="device.id" class="glass inset my-device-card">
+            <article v-for="device in filteredMyDevices" :key="device.id" class="glass inset my-device-card">
               <div class="my-device-head">
                 <div>
                   <strong>{{ device.name || device.sourceKey }}</strong>
@@ -782,31 +784,29 @@ onUnmounted(() => {
               </div>
             </article>
             <div v-if="!myDevices.length" class="hint">{{ t('device.noOwnedDevices') }}</div>
+            <div v-else-if="!filteredMyDevices.length" class="hint">{{ t('device.noSearchResults') }}</div>
           </div>
         </template>
 
         <template v-else>
           <div class="section-head">
             <h2>{{ t('app.accounts') }}</h2>
+            <button class="primary" @click="openAccountCreator">{{ t('app.create') }}</button>
           </div>
           <div class="account-layout">
-            <form class="glass inset form-grid" @submit.prevent="createUser">
-              <input v-model="userForm.username" :placeholder="t('auth.username')" />
-              <input v-model="userForm.callsign" :placeholder="t('auth.callsign')" @input="syncUserCallsign" />
-              <input v-model="userForm.email" :placeholder="t('auth.email')" />
-              <input v-model="userForm.password" type="password" :placeholder="t('auth.password')" />
-              <select v-model="userForm.role">
-                <option value="ham">{{ t('auth.ham') }}</option>
-                <option value="admin">{{ t('auth.admin') }}</option>
-              </select>
-              <label class="checkbox-line"><input v-model="userForm.enabled" type="checkbox" /> {{ t('app.enabled') }}</label>
-              <button class="primary">{{ t('app.create') }}</button>
-            </form>
             <div class="account-list">
               <article v-for="account in users" :key="account.id" class="account-card">
-                <div>
-                  <strong>{{ account.username }}</strong>
-                  <p>{{ account.callsign }} · {{ account.email }}</p>
+                <div class="account-card-head">
+                  <div>
+                    <strong>{{ account.username }}</strong>
+                    <p>{{ account.callsign }} · {{ account.email }}</p>
+                  </div>
+                  <span :class="['table-status', { online: account.enabled }]">{{ account.enabled ? t('app.enabled') : t('app.disable') }}</span>
+                </div>
+                <div class="account-meta-grid">
+                  <div class="kv-row"><span>{{ t('auth.callsign') }}</span><strong>{{ account.callsign || '-' }}</strong></div>
+                  <div class="kv-row"><span>{{ t('auth.email') }}</span><strong>{{ account.email || '-' }}</strong></div>
+                  <div class="kv-row"><span>{{ t('auth.role') }}</span><strong>{{ roleLabel(account.role) }}</strong></div>
                 </div>
                 <div class="account-actions">
                   <button class="ghost" @click="toggleUserEnabled(account)">{{ account.enabled ? t('app.disable') : t('app.enable') }}</button>
@@ -870,62 +870,133 @@ onUnmounted(() => {
         </div>
         <form class="form-grid device-editor-form" @submit.prevent="saveDevice(editingDevice)">
           <div class="device-editor-grid">
-          <label class="field-block">
-            <span>{{ t('device.name') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].name" :placeholder="t('device.name')" />
-          </label>
-          <label class="field-block">
-            <span>{{ t('device.model') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].model" :placeholder="t('device.model')" />
-          </label>
-          <label v-if="isAdmin" class="field-block">
-            <span>{{ t('device.callsign') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].callsign" :placeholder="t('device.callsign')" />
-          </label>
-          <label v-if="isAdmin" class="field-block">
-            <span>{{ t('device.dmrid') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].dmrid" :placeholder="t('device.dmrid')" />
-          </label>
-          <label class="field-block">
-            <span>{{ t('device.location') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].location" :placeholder="t('device.location')" />
-          </label>
-          <label class="field-block">
-            <span>{{ t('device.password') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].devicePassword" :placeholder="t('device.password')" />
-          </label>
-          <label v-if="isHyteraDevice(editingDevice)" class="field-block">
-            <span>{{ t('device.nrlServerAddr') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].nrlServerAddr" :placeholder="t('device.nrlServerAddr')" />
-          </label>
-          <label v-if="isHyteraDevice(editingDevice)" class="field-block">
-            <span>{{ t('device.nrlServerPort') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].nrlServerPort" :placeholder="t('device.nrlServerPort')" />
-          </label>
-          <label v-if="isHyteraDevice(editingDevice)" class="field-block">
-            <span>{{ t('device.nrlSsid') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].nrlSsid" :placeholder="t('device.nrlSsid')" />
-          </label>
-          <label class="field-block field-span-2">
-            <span>{{ t('device.description') }}</span>
-            <textarea v-model="deviceDrafts[editingDevice.id].description" rows="3" :placeholder="t('device.description')"></textarea>
-          </label>
-          <label class="field-block field-span-2">
-            <span>{{ t('device.notes') }}</span>
-            <textarea v-model="deviceDrafts[editingDevice.id].notes" rows="3" :placeholder="t('device.notes')"></textarea>
-          </label>
-          <label class="field-block">
-            <span>{{ t('device.ts1') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].staticSlot1" :placeholder="t('device.ts1')" />
-          </label>
-          <label class="field-block">
-            <span>{{ t('device.ts2') }}</span>
-            <input v-model="deviceDrafts[editingDevice.id].staticSlot2" :placeholder="t('device.ts2')" />
-          </label>
+            <section class="device-editor-section field-span-2">
+              <div class="device-editor-section-head">
+                <h3>{{ t('app.devices') }}</h3>
+              </div>
+              <div class="device-editor-section-grid">
+                <label class="field-block">
+                  <span>{{ t('device.name') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].name" :placeholder="t('device.name')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.model') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].model" :placeholder="t('device.model')" />
+                </label>
+                <label v-if="isAdmin" class="field-block">
+                  <span>{{ t('device.callsign') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].callsign" :placeholder="t('device.callsign')" />
+                </label>
+                <label v-if="isAdmin" class="field-block">
+                  <span>{{ t('device.dmrid') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].dmrid" :placeholder="t('device.dmrid')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.location') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].location" :placeholder="t('device.location')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.password') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].devicePassword" :placeholder="t('device.password')" />
+                </label>
+              </div>
+            </section>
+
+            <section class="device-editor-section field-span-2">
+              <div class="device-editor-section-head">
+                <h3>{{ t('device.staticGroups') }}</h3>
+              </div>
+              <div class="device-editor-section-grid">
+                <label class="field-block">
+                  <span>{{ t('device.ts1') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].staticSlot1" :placeholder="t('device.ts1')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.ts2') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].staticSlot2" :placeholder="t('device.ts2')" />
+                </label>
+              </div>
+            </section>
+
+            <section v-if="isHyteraDevice(editingDevice)" class="device-editor-section field-span-2 device-editor-section-nrl">
+              <div class="device-editor-section-head">
+                <h3>NRL</h3>
+              </div>
+              <div class="device-editor-section-grid">
+                <label class="field-block">
+                  <span>{{ t('device.nrlServerAddr') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].nrlServerAddr" :placeholder="t('device.nrlServerAddr')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.nrlServerPort') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].nrlServerPort" :placeholder="t('device.nrlServerPort')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.nrlSsid') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].nrlSsid" :placeholder="t('device.nrlSsid')" />
+                </label>
+              </div>
+            </section>
+
+            <section class="device-editor-section field-span-2">
+              <div class="device-editor-section-head">
+                <h3>{{ t('device.notes') }}</h3>
+              </div>
+              <div class="device-editor-section-grid">
+                <label class="field-block field-span-2">
+                  <span>{{ t('device.description') }}</span>
+                  <textarea v-model="deviceDrafts[editingDevice.id].description" rows="3" :placeholder="t('device.description')"></textarea>
+                </label>
+                <label class="field-block field-span-2">
+                  <span>{{ t('device.notes') }}</span>
+                  <textarea v-model="deviceDrafts[editingDevice.id].notes" rows="3" :placeholder="t('device.notes')"></textarea>
+                </label>
+              </div>
+            </section>
           </div>
           <div class="device-editor-actions">
             <button type="button" class="ghost" @click="deviceEditorOpen = false">{{ t('app.close') }}</button>
             <button type="submit" class="primary">{{ t('app.save') }}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div v-if="accountCreatorOpen" class="modal-backdrop">
+      <section class="auth-modal glass">
+        <div class="section-head">
+          <h2>{{ t('app.create') }} {{ t('app.accounts') }}</h2>
+          <button class="ghost" @click="accountCreatorOpen = false">{{ t('app.close') }}</button>
+        </div>
+        <form class="form-grid account-create-panel" @submit.prevent="createUser().then(() => { accountCreatorOpen = false })">
+          <div class="account-create-grid">
+            <label class="field-block">
+              <span>{{ t('auth.usernameOnly') }}</span>
+              <input v-model="userForm.username" :placeholder="t('auth.usernameOnly')" />
+            </label>
+            <label class="field-block">
+              <span>{{ t('auth.callsign') }}</span>
+              <input v-model="userForm.callsign" :placeholder="t('auth.callsign')" @input="syncUserCallsign" />
+            </label>
+            <label class="field-block field-span-2">
+              <span>{{ t('auth.email') }}</span>
+              <input v-model="userForm.email" :placeholder="t('auth.email')" />
+            </label>
+            <label class="field-block">
+              <span>{{ t('auth.password') }}</span>
+              <input v-model="userForm.password" type="password" :placeholder="t('auth.password')" />
+            </label>
+            <label class="field-block">
+              <span>{{ t('auth.role') }}</span>
+              <select v-model="userForm.role">
+                <option value="ham">{{ t('auth.ham') }}</option>
+                <option value="admin">{{ t('auth.admin') }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="account-create-footer">
+            <label class="checkbox-line"><input v-model="userForm.enabled" type="checkbox" /> {{ t('app.enabled') }}</label>
+            <button class="primary">{{ t('app.create') }}</button>
           </div>
         </form>
       </section>

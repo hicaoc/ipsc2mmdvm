@@ -6,7 +6,7 @@ export const messages = {
       login: '登录',
       register: '注册',
       logout: '退出登录',
-      overview: '系统首页',
+      overview: '通话列表',
       calls: '通话列表',
       devices: '设备',
       myDevices: '我的设备',
@@ -27,6 +27,7 @@ export const messages = {
     },
     auth: {
       username: '用户名 / 呼号',
+      usernameOnly: '用户名',
       callsign: '呼号',
       email: '邮箱',
       password: '密码',
@@ -100,7 +101,9 @@ export const messages = {
       ts2: 'TS2 静态组',
       status: '状态',
       protocol: '协议',
-      saveSuccess: '设备信息已保存'
+      saveSuccess: '设备信息已保存',
+      searchPlaceholder: '搜索名称 / 呼号 / DMRID',
+      noSearchResults: '没有匹配的设备'
     }
   },
   en: {
@@ -110,7 +113,7 @@ export const messages = {
       login: 'Login',
       register: 'Register',
       logout: 'Logout',
-      overview: 'Overview',
+      overview: 'Call List',
       calls: 'Call List',
       devices: 'Devices',
       myDevices: 'My Devices',
@@ -131,6 +134,7 @@ export const messages = {
     },
     auth: {
       username: 'Username / Callsign',
+      usernameOnly: 'Username',
       callsign: 'Callsign',
       email: 'Email',
       password: 'Password',
@@ -204,7 +208,9 @@ export const messages = {
       ts2: 'TS2 Static Groups',
       status: 'Status',
       protocol: 'Protocol',
-      saveSuccess: 'Device updated'
+      saveSuccess: 'Device updated',
+      searchPlaceholder: 'Search name / callsign / DMRID',
+      noSearchResults: 'No matching devices'
     }
   }
 }
