@@ -241,6 +241,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	)
 	ingressGuard := repeater.NewGuard()
 	groupRouter := routing.NewSubscriptionManager(15 * time.Minute)
+	privateRouter := newRecentPrivateRouteCache(recentPrivateRouteTTL)
 	staticGroups, err := registrySvc.LoadStaticGroups()
 	if err != nil {
 		return fmt.Errorf("failed to load static group subscriptions: %w", err)
@@ -576,7 +577,19 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		}
 		return sent
 	}
-	legacyForward := func(frontend string, pkt proto.Packet, addr *net.UDPAddr) {
+	legacyForward := func(frontend, sourceDeviceKey string, pkt proto.Packet, addr *net.UDPAddr) {
+		if targetKey, ok := routePrivateCall(privateRouter, frontend, sourceDeviceKey, pkt, time.Now().UTC(), sendToTarget); ok {
+			slog.Debug("private call routed via recent activity",
+				"frontend", frontend,
+				"sourceKey", sourceDeviceKey,
+				"targetKey", targetKey,
+				"dst", pkt.Dst,
+				"src", pkt.Src,
+				"slot", pkt.Slot,
+				"streamID", pkt.StreamID)
+			return
+		}
+
 		if frontend == "moto" {
 			if hyteraServer != nil {
 				ingressGuard.MarkForwarded("hytera", pkt)
@@ -633,12 +646,15 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 				"frontend", frontend, "source", source, "slot", pkt.Slot, "streamID", pkt.StreamID)
 			return
 		}
+		if pkt.Src != 0 {
+			privateRouter.Remember(uint32(pkt.Src), recordSourceKey, time.Now().UTC())
+		}
 		recordCall(frontend, recordSourceKey, category, pkt, addr)
 		if pkt.GroupCall {
 			_ = routeGroupCall(frontend, recordSourceKey, pkt)
 			return
 		}
-		legacyForward(frontend, pkt, addr)
+		legacyForward(frontend, recordSourceKey, pkt, addr)
 	}
 
 	if cfg.Hytera.Enabled {
@@ -658,11 +674,11 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 				serverPort = 60050
 			}
 			return hytera.NRLPeerConfig{
-				ServerAddr: serverAddr,
-				ServerPort: serverPort,
-				SSID:       dev.NRLSSID,
-				Callsign:   dev.Callsign,
-				DMRID:      dev.DMRID,
+				ServerAddr:      serverAddr,
+				ServerPort:      serverPort,
+				SSID:            dev.NRLSSID,
+				Callsign:        dev.Callsign,
+				DMRID:           dev.DMRID,
 				HyteraVoicePort: dev.Port,
 			}, true
 		})
