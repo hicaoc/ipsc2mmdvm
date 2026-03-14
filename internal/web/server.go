@@ -40,7 +40,7 @@ type Server struct {
 
 	wsMu         sync.RWMutex
 	wsClients    int
-	audioClients int
+	audioTargets int
 	runtimeSubs  map[chan RuntimeInfo]struct{}
 }
 
@@ -616,10 +616,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	)
 	runtimeEvents, unsubscribeRT = s.subscribeRuntime()
 	defer unsubscribeRT()
+	audioTargets := map[string]struct{}{}
 	defer func() {
 		if unsubscribeAudio != nil {
 			unsubscribeAudio()
-			s.trackAudioClient(-1)
+			s.trackAudioTargets(-len(audioTargets))
 		}
 	}()
 
@@ -644,27 +645,38 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	audioTarget := ""
 	for {
 		select {
 		case msg := <-control:
 			switch msg.Type {
 			case "audio_subscribe":
-				audioTarget = strings.TrimSpace(msg.Target)
-				if audioTarget == "" {
+				target := strings.TrimSpace(msg.Target)
+				if target == "" {
 					continue
 				}
+				if _, ok := audioTargets[target]; ok {
+					continue
+				}
+				audioTargets[target] = struct{}{}
 				if s.audio != nil && audioEvents == nil {
 					audioEvents, unsubscribeAudio = s.audio.Subscribe()
-					s.trackAudioClient(1)
 				}
+				s.trackAudioTargets(1)
 			case "audio_unsubscribe":
-				audioTarget = ""
-				if unsubscribeAudio != nil {
+				target := strings.TrimSpace(msg.Target)
+				if target == "" {
+					s.trackAudioTargets(-len(audioTargets))
+					audioTargets = map[string]struct{}{}
+				} else {
+					if _, ok := audioTargets[target]; ok {
+						delete(audioTargets, target)
+						s.trackAudioTargets(-1)
+					}
+				}
+				if len(audioTargets) == 0 && unsubscribeAudio != nil {
 					unsubscribeAudio()
 					unsubscribeAudio = nil
 					audioEvents = nil
-					s.trackAudioClient(-1)
 				}
 			}
 		case event, ok := <-events:
@@ -681,7 +693,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if audioTarget == "" || audioTargetKeyForChunk(chunk) != audioTarget {
+			target := audioTargetKeyForChunk(chunk)
+			if target == "" {
+				continue
+			}
+			if _, ok := audioTargets[target]; !ok {
 				continue
 			}
 			if err := conn.WriteJSON(chunk); err != nil {
@@ -777,11 +793,11 @@ func (s *Server) trackWSClient(delta int) {
 	}
 }
 
-func (s *Server) trackAudioClient(delta int) {
+func (s *Server) trackAudioTargets(delta int) {
 	s.wsMu.Lock()
-	s.audioClients += delta
-	if s.audioClients < 0 {
-		s.audioClients = 0
+	s.audioTargets += delta
+	if s.audioTargets < 0 {
+		s.audioTargets = 0
 	}
 	runtime := s.runtimeSnapshotLocked()
 	subs := make([]chan RuntimeInfo, 0, len(s.runtimeSubs))
@@ -807,7 +823,7 @@ func (s *Server) runtimeSnapshot() RuntimeInfo {
 func (s *Server) runtimeSnapshotLocked() RuntimeInfo {
 	runtime := s.runtime
 	runtime.BrowserClients = s.wsClients
-	runtime.AudioSubscribers = s.audioClients
+	runtime.AudioSubscribers = s.audioTargets
 	return runtime
 }
 

@@ -24,11 +24,9 @@ const busy = ref(false)
 const message = ref('')
 const nowTick = ref(Date.now())
 const wsConnected = ref(false)
-const audioEnabled = ref(false)
 const audioAvailable = ref(false)
-const audioStreamCount = ref(0)
 const audioError = ref('')
-const selectedAudioTarget = ref('')
+const selectedAudioTargets = ref([])
 const deviceSearch = ref('')
 
 let snapshotIntervalId = null
@@ -82,10 +80,8 @@ const audioTargets = computed(() => {
   }
   return items
 })
-const selectedAudioTargetLabel = computed(() => {
-  const target = audioTargets.value.find((item) => item.key === selectedAudioTarget.value)
-  return target?.label || ''
-})
+const audioEnabled = computed(() => selectedAudioTargets.value.length > 0)
+const audioSubscriptionCount = computed(() => selectedAudioTargets.value.length)
 const navItems = computed(() => {
   const items = [
     { key: 'overview', label: t('app.overview') },
@@ -271,8 +267,12 @@ function audioTargetLabel(call) {
   return `TG ${id} · TS${slot}`
 }
 
+function isAudioTargetSelected(targetKey) {
+  return selectedAudioTargets.value.includes(targetKey)
+}
+
 function audioTargetIcon(targetKey) {
-  return audioEnabled.value && selectedAudioTarget.value === targetKey ? '🔊' : '🔇'
+  return isAudioTargetSelected(targetKey) ? '🔊' : '🔇'
 }
 
 function callStatusLabel(call) {
@@ -475,7 +475,7 @@ async function ensureAudioContext() {
     audioError.value = ''
     return true
   } catch (error) {
-    audioEnabled.value = false
+    selectedAudioTargets.value = []
     audioError.value = error?.message || t('audio.enableFailed')
     return false
   }
@@ -485,10 +485,8 @@ async function disableAudio() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'audio_unsubscribe' }))
   }
-  audioEnabled.value = false
   audioAvailable.value = false
-  selectedAudioTarget.value = ''
-  audioStreamCount.value = 0
+  selectedAudioTargets.value = []
   audioStreams.clear()
   if (audioContext) {
     try {
@@ -499,28 +497,26 @@ async function disableAudio() {
   audioMasterGain = null
 }
 
-async function toggleAudioTarget(targetKey) {
-  const nextTarget = String(targetKey || '').trim()
-  if (!nextTarget) return
-  if (selectedAudioTarget.value === nextTarget && audioEnabled.value) {
-    await disableAudio()
-    return
+function chunkTargetKey(payload) {
+  if (!payload) return ''
+  if (payload.callType === 'analog') {
+    const sourceKey = String(payload.sourceKey || '').trim()
+    return sourceKey ? `analog:${sourceKey}` : ''
   }
-  const ready = await ensureAudioContext()
-  if (!ready) return
-  selectedAudioTarget.value = nextTarget
-  audioEnabled.value = true
-  audioAvailable.value = false
-  audioStreamCount.value = 0
-  audioStreams.clear()
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'audio_subscribe', target: nextTarget }))
-  }
+  const dstId = Number(payload.dstId || 0)
+  if (!dstId) return ''
+  const slot = Number(payload.slot || 0)
+  if (payload.callType === 'private') return `private:${dstId}:${slot}`
+  return `group:${dstId}:${slot}`
 }
 
 function cleanupAudioStreams(now = performance.now()) {
   for (const [streamId, state] of audioStreams.entries()) {
-    if (state.ended && state.nextTime <= (audioContext?.currentTime || 0)+0.05) {
+    if (state.targetKey && !isAudioTargetSelected(state.targetKey)) {
+      audioStreams.delete(streamId)
+      continue
+    }
+    if (state.ended && state.nextTime <= (audioContext?.currentTime || 0) + 0.05) {
       audioStreams.delete(streamId)
       continue
     }
@@ -528,7 +524,31 @@ function cleanupAudioStreams(now = performance.now()) {
       audioStreams.delete(streamId)
     }
   }
-  audioStreamCount.value = audioStreams.size
+}
+
+async function toggleAudioTarget(targetKey) {
+  const nextTarget = String(targetKey || '').trim()
+  if (!nextTarget) return
+  if (isAudioTargetSelected(nextTarget)) {
+    const remaining = selectedAudioTargets.value.filter((item) => item !== nextTarget)
+    if (!remaining.length) {
+      await disableAudio()
+      return
+    }
+    selectedAudioTargets.value = remaining
+    cleanupAudioStreams()
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'audio_unsubscribe', target: nextTarget }))
+    }
+    return
+  }
+  const ready = await ensureAudioContext()
+  if (!ready) return
+  selectedAudioTargets.value = [...selectedAudioTargets.value, nextTarget]
+  audioAvailable.value = false
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'audio_subscribe', target: nextTarget }))
+  }
 }
 
 function decodePCM16Base64(value) {
@@ -546,9 +566,12 @@ function decodePCM16Base64(value) {
 function handleAudioChunk(payload) {
   audioAvailable.value = true
   if (!payload?.streamId) return
-  const state = audioStreams.get(payload.streamId) || { nextTime: 0, lastSeenAt: 0, ended: false }
+  const targetKey = chunkTargetKey(payload)
+  if (targetKey && !isAudioTargetSelected(targetKey)) return
+  const state = audioStreams.get(payload.streamId) || { nextTime: 0, lastSeenAt: 0, ended: false, targetKey: '' }
   state.lastSeenAt = performance.now()
   state.ended = Boolean(payload.ended)
+  state.targetKey = targetKey
   audioStreams.set(payload.streamId, state)
   cleanupAudioStreams(state.lastSeenAt)
 
@@ -600,8 +623,8 @@ function connectWS() {
   }
   ws.onopen = () => {
     wsConnected.value = true
-    if (audioEnabled.value && selectedAudioTarget.value) {
-      ws.send(JSON.stringify({ type: 'audio_subscribe', target: selectedAudioTarget.value }))
+    for (const targetKey of selectedAudioTargets.value) {
+      ws.send(JSON.stringify({ type: 'audio_subscribe', target: targetKey }))
     }
   }
   ws.onmessage = (event) => {
@@ -848,7 +871,7 @@ onUnmounted(() => {
       <aside class="sidebar glass">
         <div class="sidebar-head">
           <p class="eyebrow">{{ t('dashboard.welcome') }}</p>
-          <strong>{{ user ? `${user.username} / ${user.callsign || '-'}` : t('app.title') }}</strong>
+          <strong v-if="user">{{ `${user.username} / ${user.callsign || '-'}` }}</strong>
           <span class="muted-inline">{{ wsConnected ? t('call.wsOnline') : t('call.wsOffline') }}</span>
         </div>
         <nav class="sidebar-nav" :aria-label="t('app.overview')">
@@ -892,7 +915,7 @@ onUnmounted(() => {
                   <button
                     v-for="target in audioTargets"
                     :key="target.key"
-                    :class="selectedAudioTarget === target.key ? 'primary' : 'ghost'"
+                    :class="isAudioTargetSelected(target.key) ? 'primary' : 'ghost'"
                     @click="toggleAudioTarget(target.key)"
                   >
                     <span class="audio-target-icon">{{ audioTargetIcon(target.key) }}</span>
@@ -901,6 +924,7 @@ onUnmounted(() => {
                   </button>
                 </div>
                 <span v-else class="muted-inline">{{ t('audio.noTargets') }}</span>
+                <span class="call-count-badge">{{ audioSubscriptionCount }} {{ t('audio.streams') }}</span>
                 <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
               </div>
             </div>
