@@ -153,6 +153,20 @@ function callSourceDevice(call) {
   return call?.sourceName || '-'
 }
 
+function callRegisteredDeviceID(call) {
+  const sourceKey = String(call?.sourceKey || '').trim()
+  if (sourceKey) {
+    const device = snapshot.value.devices.find((item) => item?.sourceKey === sourceKey)
+    if (device?.dmrid) return String(device.dmrid)
+  }
+  return '-'
+}
+
+function callPacketDeviceID(call) {
+  if (call?.repeaterId) return String(call.repeaterId)
+  return '-'
+}
+
 function deviceAddress(device) {
   if (!device?.ip) return '-'
   return device.port ? `${device.ip}:${device.port}` : device.ip
@@ -747,10 +761,10 @@ onUnmounted(() => {
           </div>
           <div class="kv-list compact runtime-kv-list runtime-kv-list-sidebar">
             <div class="kv-row"><span>IP</span><strong>{{ runtimePrimaryHost }}</strong></div>
-            <div class="kv-row"><span>IPSC</span><strong>{{ runtimePort(snapshot.runtime.ipscListen) }}</strong></div>
-            <div class="kv-row"><span>P2P</span><strong>{{ runtimePort(snapshot.runtime.hyteraP2pListen) }}</strong></div>
-            <div class="kv-row"><span>DMR</span><strong>{{ runtimePort(snapshot.runtime.hyteraDmrListen) }}</strong></div>
-            <div class="kv-row"><span>RDAC</span><strong>{{ runtimePort(snapshot.runtime.hyteraRdacListen) }}</strong></div>
+            <div class="kv-row"><span>Moto IPSC</span><strong>{{ runtimePort(snapshot.runtime.ipscListen) }}</strong></div>
+            <div class="kv-row"><span>Hytera P2P</span><strong>{{ runtimePort(snapshot.runtime.hyteraP2pListen) }}</strong></div>
+            <div class="kv-row"><span>Hytera DMR</span><strong>{{ runtimePort(snapshot.runtime.hyteraDmrListen) }}</strong></div>
+            <div class="kv-row"><span>Hytera RDAC</span><strong>{{ runtimePort(snapshot.runtime.hyteraRdacListen) }}</strong></div>
           </div>
         </article>
       </aside>
@@ -822,8 +836,6 @@ onUnmounted(() => {
                   <div class="call-card-compact-grid">
                     <div class="call-pill"><span>TG</span><strong>{{ call.dstId || '-' }}</strong></div>
                     <div class="call-pill"><span>TS</span><strong>{{ call.slot || '-' }}</strong></div>
-                    <div class="call-pill"><span>{{ t('call.callsign') }}</span><strong>{{ call.sourceCallsign || '-' }}</strong></div>
-                    <div class="call-pill"><span>{{ t('call.sourceDevice') }}</span><strong>{{ callSourceDevice(call) }}</strong></div>
                   </div>
                   <div class="call-card-compact-grid call-card-compact-grid-secondary">
                     <div class="call-pill call-pill-dmrid"><span>{{ t('call.dmrid') }}</span><strong>{{ call.sourceDmrid || '-' }}</strong></div>
@@ -831,7 +843,9 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <div class="call-card-compact-footer">
-                  <span class="muted-inline">ID {{ call.srcId || '-' }}</span>
+                  <span class="muted-inline">{{ t('call.sourceDevice') }} {{ callSourceDevice(call) }}</span>
+                  <span class="muted-inline">设备ID {{ callRegisteredDeviceID(call) }}</span>
+                  <span class="muted-inline">报文ID {{ callPacketDeviceID(call) }}</span>
                   <span class="muted-inline">{{ call.frontend || '-' }}</span>
                   <span class="muted-inline">{{ call.fromIp || '-' }}{{ call.fromPort ? `:${call.fromPort}` : '' }}</span>
                 </div>

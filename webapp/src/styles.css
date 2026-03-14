@@ -553,6 +553,11 @@ select:focus {
   min-height: 0;
 }
 
+.content-overview > .call-focus-panel {
+  width: 100%;
+  align-self: stretch;
+}
+
 .call-focus-panel {
   display: flex;
   flex-direction: column;
@@ -1426,6 +1431,10 @@ select:focus {
     overflow: visible;
   }
 
+  .content.content-overview {
+    padding: 0;
+  }
+
   .call-hero-top,
   .call-hero-body,
   .call-card-top,
@@ -1572,8 +1581,12 @@ select:focus {
     padding: 12px;
   }
 
+  .content.content-overview {
+    padding: 0;
+  }
+
   .topbar h1 {
-    font-size: clamp(28px, 10vw, 42px);
+    font-size: clamp(28px, calc(14px + 3.125vw), 34px);
   }
 
   .metrics-row {
