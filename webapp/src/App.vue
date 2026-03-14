@@ -28,6 +28,7 @@ const audioEnabled = ref(false)
 const audioAvailable = ref(false)
 const audioStreamCount = ref(0)
 const audioError = ref('')
+const selectedAudioTarget = ref('')
 const deviceSearch = ref('')
 
 let snapshotIntervalId = null
@@ -65,6 +66,26 @@ const sortedCalls = computed(() =>
 const activeCalls = computed(() => sortedCalls.value.filter((call) => isActiveCall(call)))
 const liveHeadlineCall = computed(() => activeCalls.value[0] || null)
 const overviewCalls = computed(() => sortedCalls.value)
+const audioTargets = computed(() => {
+  const seen = new Set()
+  const items = []
+  for (const call of [...activeCalls.value, ...sortedCalls.value]) {
+    const key = audioTargetKey(call)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    items.push({
+      key,
+      label: audioTargetLabel(call),
+      active: isActiveCall(call)
+    })
+    if (items.length >= 8) break
+  }
+  return items
+})
+const selectedAudioTargetLabel = computed(() => {
+  const target = audioTargets.value.find((item) => item.key === selectedAudioTarget.value)
+  return target?.label || ''
+})
 const navItems = computed(() => {
   const items = [
     { key: 'overview', label: t('app.overview') },
@@ -229,6 +250,31 @@ function callTypeLabel(call) {
   return t('call.group')
 }
 
+function audioTargetKey(call) {
+  if (!call) return ''
+  if (call.callType === 'analog') {
+    const sourceKey = String(call.sourceKey || '').replace(/^nrl:/, '')
+    return sourceKey ? `analog:${sourceKey}` : ''
+  }
+  if (!call.dstId) return ''
+  const slot = Number(call.slot || 0)
+  if (call.callType === 'private') return `private:${call.dstId}:${slot}`
+  return `group:${call.dstId}:${slot}`
+}
+
+function audioTargetLabel(call) {
+  if (!call) return '-'
+  if (call.callType === 'analog') return `${t('call.analog')} · ${callSourceDevice(call)}`
+  const id = call.dstId || '-'
+  const slot = call.slot || '-'
+  if (call.callType === 'private') return `${t('call.private')} ${id} · TS${slot}`
+  return `TG ${id} · TS${slot}`
+}
+
+function audioTargetIcon(targetKey) {
+  return audioEnabled.value && selectedAudioTarget.value === targetKey ? '🔊' : '🔇'
+}
+
 function callStatusLabel(call) {
   return isActiveCall(call) ? t('call.live') : callTypeLabel(call)
 }
@@ -385,7 +431,7 @@ function scheduleReconnect() {
   }, 1200)
 }
 
-async function enableAudio() {
+async function ensureAudioContext() {
   try {
     const AudioCtor = window.AudioContext || window.webkitAudioContext
     if (!AudioCtor) throw new Error(t('audio.unsupported'))
@@ -396,18 +442,22 @@ async function enableAudio() {
       audioMasterGain.connect(audioContext.destination)
     }
     await audioContext.resume()
-    audioEnabled.value = true
     audioError.value = ''
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send('audio_subscribe')
+    return true
   } catch (error) {
     audioEnabled.value = false
     audioError.value = error?.message || t('audio.enableFailed')
+    return false
   }
 }
 
 async function disableAudio() {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send('audio_unsubscribe')
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'audio_unsubscribe' }))
+  }
   audioEnabled.value = false
+  audioAvailable.value = false
+  selectedAudioTarget.value = ''
   audioStreamCount.value = 0
   audioStreams.clear()
   if (audioContext) {
@@ -417,6 +467,25 @@ async function disableAudio() {
   }
   audioContext = null
   audioMasterGain = null
+}
+
+async function toggleAudioTarget(targetKey) {
+  const nextTarget = String(targetKey || '').trim()
+  if (!nextTarget) return
+  if (selectedAudioTarget.value === nextTarget && audioEnabled.value) {
+    await disableAudio()
+    return
+  }
+  const ready = await ensureAudioContext()
+  if (!ready) return
+  selectedAudioTarget.value = nextTarget
+  audioEnabled.value = true
+  audioAvailable.value = false
+  audioStreamCount.value = 0
+  audioStreams.clear()
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'audio_subscribe', target: nextTarget }))
+  }
 }
 
 function cleanupAudioStreams(now = performance.now()) {
@@ -501,7 +570,9 @@ function connectWS() {
   }
   ws.onopen = () => {
     wsConnected.value = true
-    if (audioEnabled.value) ws.send('audio_subscribe')
+    if (audioEnabled.value && selectedAudioTarget.value) {
+      ws.send(JSON.stringify({ type: 'audio_subscribe', target: selectedAudioTarget.value }))
+    }
   }
   ws.onmessage = (event) => {
     const payload = JSON.parse(event.data)
@@ -786,12 +857,20 @@ onUnmounted(() => {
                 <h3>{{ t('app.calls') }}</h3>
                 <p class="hint">{{ t('call.priorityHint') }}</p>
               </div>
-              <div class="call-panel-actions">
-                <button :class="audioEnabled ? 'primary' : 'ghost'" @click="audioEnabled ? disableAudio() : enableAudio()">
-                  {{ audioEnabled ? t('audio.disable') : t('audio.enable') }}
-                  <span class="muted-inline">· {{ audioAvailable ? t('audio.available') : t('audio.waiting') }}</span>
-                  <span class="muted-inline">· {{ t('audio.streams') }} {{ audioStreamCount }}</span>
-                </button>
+              <div class="call-panel-actions audio-target-panel">
+                <div v-if="audioTargets.length" class="audio-target-list">
+                  <button
+                    v-for="target in audioTargets"
+                    :key="target.key"
+                    :class="selectedAudioTarget === target.key ? 'primary' : 'ghost'"
+                    @click="toggleAudioTarget(target.key)"
+                  >
+                    <span class="audio-target-icon">{{ audioTargetIcon(target.key) }}</span>
+                    {{ target.label }}
+                    <span v-if="target.active" class="muted-inline">· {{ t('call.live') }}</span>
+                  </button>
+                </div>
+                <span v-else class="muted-inline">{{ t('audio.noTargets') }}</span>
                 <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
               </div>
             </div>

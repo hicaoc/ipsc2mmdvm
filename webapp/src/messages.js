@@ -85,6 +85,8 @@ export const messages = {
       disable: '停止音频',
       available: '音频已接入',
       waiting: '等待音频',
+      idle: '点击下方目标开始收听',
+      noTargets: '暂无可收听的近期通话目标',
       streams: '路数',
       unsupported: '当前浏览器不支持 WebAudio',
       enableFailed: '音频启动失败'
@@ -203,6 +205,8 @@ export const messages = {
       disable: 'Stop Audio',
       available: 'Audio Live',
       waiting: 'Waiting Audio',
+      idle: 'Pick a recent target to listen',
+      noTargets: 'No recent audio targets',
       streams: 'Streams',
       unsupported: 'This browser does not support WebAudio',
       enableFailed: 'Failed to start audio'

@@ -578,6 +578,30 @@ select:focus {
   margin-bottom: 16px;
 }
 
+.audio-target-panel {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.audio-target-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.audio-target-list button {
+  padding: 10px 14px;
+}
+
+.audio-target-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  line-height: 1;
+}
+
 .call-hero {
   flex-direction: column;
   align-items: stretch;
@@ -781,6 +805,11 @@ select:focus {
   text-align: right;
 }
 
+.call-pill-started strong {
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .call-card-compact-footer {
   margin-top: 8px;
   justify-content: flex-start;
@@ -878,7 +907,7 @@ select:focus {
   }
 
   .call-pill-started {
-    min-width: 0;
+    min-width: 192px;
   }
 }
 
@@ -1445,6 +1474,34 @@ select:focus {
     flex-direction: column;
   }
 
+  .call-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .audio-target-panel {
+    width: 100%;
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+
+  .audio-target-list {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  .audio-target-list button {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .call-count-badge {
+    align-self: flex-start;
+  }
+
   .call-card-inline {
     display: flex;
     gap: 10px;
@@ -1583,6 +1640,14 @@ select:focus {
 
   .content.content-overview {
     padding: 0;
+  }
+
+  .audio-target-list {
+    gap: 10px;
+  }
+
+  .audio-target-list button {
+    padding: 12px 14px;
   }
 
   .topbar h1 {

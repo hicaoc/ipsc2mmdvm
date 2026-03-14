@@ -74,6 +74,11 @@ type snapshotPayload struct {
 	Runtime   RuntimeInfo                            `json:"runtime"`
 }
 
+type wsControlMessage struct {
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
 func NewServer(reg *registry.Service, router *routing.SubscriptionManager, audioHub *audio.Hub, cfg *config.Config) *Server {
 	runtime := RuntimeInfo{
 		WebListenAddress: cfg.Web.Address,
@@ -619,6 +624,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	done := make(chan struct{})
+	control := make(chan wsControlMessage, 8)
 	go func() {
 		defer close(done)
 		for {
@@ -626,13 +632,34 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
-			switch strings.TrimSpace(string(data)) {
+			msg := parseWSControlMessage(data)
+			if msg.Type == "" {
+				continue
+			}
+			select {
+			case control <- msg:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	audioTarget := ""
+	for {
+		select {
+		case msg := <-control:
+			switch msg.Type {
 			case "audio_subscribe":
+				audioTarget = strings.TrimSpace(msg.Target)
+				if audioTarget == "" {
+					continue
+				}
 				if s.audio != nil && audioEvents == nil {
 					audioEvents, unsubscribeAudio = s.audio.Subscribe()
 					s.trackAudioClient(1)
 				}
 			case "audio_unsubscribe":
+				audioTarget = ""
 				if unsubscribeAudio != nil {
 					unsubscribeAudio()
 					unsubscribeAudio = nil
@@ -640,11 +667,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					s.trackAudioClient(-1)
 				}
 			}
-		}
-	}()
-
-	for {
-		select {
 		case event, ok := <-events:
 			if !ok {
 				return
@@ -658,6 +680,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 			if !ok {
 				return
+			}
+			if audioTarget == "" || audioTargetKeyForChunk(chunk) != audioTarget {
+				continue
 			}
 			if err := conn.WriteJSON(chunk); err != nil {
 				return
@@ -675,6 +700,44 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case <-done:
 			return
 		}
+	}
+}
+
+func parseWSControlMessage(data []byte) wsControlMessage {
+	raw := strings.TrimSpace(string(data))
+	switch raw {
+	case "audio_subscribe":
+		return wsControlMessage{Type: "audio_subscribe"}
+	case "audio_unsubscribe":
+		return wsControlMessage{Type: "audio_unsubscribe"}
+	}
+
+	var msg wsControlMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return wsControlMessage{}
+	}
+	msg.Type = strings.TrimSpace(msg.Type)
+	msg.Target = strings.TrimSpace(msg.Target)
+	return msg
+}
+
+func audioTargetKeyForChunk(chunk audio.Chunk) string {
+	switch chunk.CallType {
+	case "analog":
+		if strings.TrimSpace(chunk.SourceKey) == "" {
+			return ""
+		}
+		return "analog:" + strings.TrimSpace(chunk.SourceKey)
+	case "private":
+		if chunk.DstID == 0 {
+			return ""
+		}
+		return "private:" + strconv.FormatUint(uint64(chunk.DstID), 10) + ":" + strconv.Itoa(chunk.Slot)
+	default:
+		if chunk.DstID == 0 {
+			return ""
+		}
+		return "group:" + strconv.FormatUint(uint64(chunk.DstID), 10) + ":" + strconv.Itoa(chunk.Slot)
 	}
 }
 
