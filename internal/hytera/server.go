@@ -138,6 +138,7 @@ type Server struct {
 	sendFilter         func(sourceKey string) bool
 	nrlResolver        func(sourceKey string) (NRLPeerConfig, bool)
 	nrlCallHandler     func(call NRLCallEvent)
+	analogAudioHandler func(event AnalogAudioEvent)
 	nrlBridge          *nrlBridge
 }
 
@@ -186,6 +187,10 @@ func (s *Server) SetNRLCallHandler(handler func(call NRLCallEvent)) {
 	s.nrlCallHandler = handler
 }
 
+func (s *Server) SetAnalogAudioHandler(handler func(event AnalogAudioEvent)) {
+	s.analogAudioHandler = handler
+}
+
 func (s *Server) Start() error {
 	p2pAddr := &net.UDPAddr{IP: net.IPv4zero, Port: int(s.cfg.Hytera.P2PPort)}
 	p2p, err := net.ListenUDP("udp", p2pAddr)
@@ -220,7 +225,7 @@ func (s *Server) Start() error {
 	if s.nrlResolver != nil {
 		// Use Hytera voice socket for NRL bridge egress so local source port
 		// matches voice service expectations.
-		bridge, err := newNRLBridge(s.cfg, s.dmrConn, s.nrlResolver, s.nrlCallHandler)
+		bridge, err := newNRLBridge(s.cfg, s.dmrConn, s.nrlResolver, s.nrlCallHandler, s.analogAudioHandler)
 		if err != nil {
 			return fmt.Errorf("error starting Hytera NRL bridge: %w", err)
 		}

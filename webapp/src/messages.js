@@ -78,6 +78,15 @@ export const messages = {
       online: '在线',
       offline: '离线'
     },
+    audio: {
+      enable: '启用音频',
+      disable: '停止音频',
+      available: '音频已接入',
+      waiting: '等待音频',
+      streams: '路数',
+      unsupported: '当前浏览器不支持 WebAudio',
+      enableFailed: '音频启动失败'
+    },
     device: {
       owner: '归属用户',
       myDevicesHint: '仅显示与当前账号呼号一致的设备，可编辑除呼号和 DMRID 外的信息',
@@ -184,6 +193,15 @@ export const messages = {
       wsOffline: 'WS offline',
       online: 'Online',
       offline: 'Offline'
+    },
+    audio: {
+      enable: 'Enable Audio',
+      disable: 'Stop Audio',
+      available: 'Audio Live',
+      waiting: 'Waiting Audio',
+      streams: 'Streams',
+      unsupported: 'This browser does not support WebAudio',
+      enableFailed: 'Failed to start audio'
     },
     device: {
       owner: 'Owner',

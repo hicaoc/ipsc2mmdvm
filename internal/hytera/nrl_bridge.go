@@ -43,11 +43,21 @@ type NRLPeerConfig struct {
 	HyteraVoicePort int
 }
 
+type AnalogAudioEvent struct {
+	StreamID    string
+	Frontend    string
+	SourceKey   string
+	SourceDMRID uint32
+	PCM         []int16
+	Ended       bool
+}
+
 type nrlBridge struct {
-	cfg         *config.Config
-	hyteraConn  *net.UDPConn
-	resolver    func(sourceKey string) (NRLPeerConfig, bool)
-	callHandler func(call NRLCallEvent)
+	cfg          *config.Config
+	hyteraConn   *net.UDPConn
+	resolver     func(sourceKey string) (NRLPeerConfig, bool)
+	callHandler  func(call NRLCallEvent)
+	audioHandler func(event AnalogAudioEvent)
 
 	mu       sync.Mutex
 	sessions map[string]*nrlSession
@@ -109,7 +119,13 @@ type NRLCallEvent struct {
 	FromPort        int
 }
 
-func newNRLBridge(cfg *config.Config, hyteraConn *net.UDPConn, resolver func(sourceKey string) (NRLPeerConfig, bool), callHandler func(call NRLCallEvent)) (*nrlBridge, error) {
+func newNRLBridge(
+	cfg *config.Config,
+	hyteraConn *net.UDPConn,
+	resolver func(sourceKey string) (NRLPeerConfig, bool),
+	callHandler func(call NRLCallEvent),
+	audioHandler func(event AnalogAudioEvent),
+) (*nrlBridge, error) {
 	if hyteraConn == nil {
 		return nil, errors.New("hytera UDP connection is nil")
 	}
@@ -117,12 +133,13 @@ func newNRLBridge(cfg *config.Config, hyteraConn *net.UDPConn, resolver func(sou
 		return nil, errors.New("nrl resolver is nil")
 	}
 	b := &nrlBridge{
-		cfg:         cfg,
-		hyteraConn:  hyteraConn,
-		resolver:    resolver,
-		callHandler: callHandler,
-		sessions:    map[string]*nrlSession{},
-		done:        make(chan struct{}),
+		cfg:          cfg,
+		hyteraConn:   hyteraConn,
+		resolver:     resolver,
+		callHandler:  callHandler,
+		audioHandler: audioHandler,
+		sessions:     map[string]*nrlSession{},
+		done:         make(chan struct{}),
 	}
 	b.wg.Add(1)
 	go b.heartbeatLoop()
@@ -347,6 +364,7 @@ func (s *nrlSession) handleHyteraVoice(addr *net.UDPAddr, data []byte) {
 		return
 	}
 	voice := data[hyteraAnalogHeaderLen:]
+	s.emitAudioChunk("analog-hytera", fmt.Sprintf("analog:hytera:%s", s.sourceKey), 0, ulawSamplesToPCM16(voice), false)
 	for start := 0; start+hyteraAnalogFrameSamples <= len(voice); start += hyteraAnalogFrameSamples {
 		alaw := ulawChunkToAlaw(voice[start : start+hyteraAnalogFrameSamples])
 		_ = s.sendNRLVoice(alaw)
@@ -478,6 +496,7 @@ func (s *nrlSession) handleNRLPacket(pkt nrlPacket) {
 		s.emitCallEventLocked(false)
 	}
 	s.callLastVoiceAt = now
+	s.emitAudioChunk("analog-nrl", fmt.Sprintf("analog:nrl:%s:%d", s.sourceKey, s.callStreamID), s.callSourceDMRID, alawSamplesToPCM16(pkt.Data), false)
 	for start := 0; start+hyteraAnalogFrameSamples <= len(pkt.Data); start += hyteraAnalogFrameSamples {
 		ulaw := alawChunkToUlaw(pkt.Data[start : start+hyteraAnalogFrameSamples])
 		s.ulawBuffer = append(s.ulawBuffer, ulaw...)
@@ -523,6 +542,9 @@ func (s *nrlSession) expireCallIfIdle(now time.Time) {
 
 func (s *nrlSession) emitCallEventLocked(ended bool) {
 	if s.bridge.callHandler == nil || s.callStreamID == 0 {
+		if ended && s.callStreamID != 0 {
+			s.emitAudioChunk("analog-nrl", fmt.Sprintf("analog:nrl:%s:%d", s.sourceKey, s.callStreamID), s.callSourceDMRID, nil, true)
+		}
 		return
 	}
 	event := NRLCallEvent{
@@ -541,6 +563,39 @@ func (s *nrlSession) emitCallEventLocked(ended bool) {
 	// Keep start/end ordering deterministic. Async dispatch can reorder events
 	// under load and make the registry insert duplicated NRL call rows.
 	s.bridge.callHandler(event)
+	if ended {
+		s.emitAudioChunk("analog-nrl", fmt.Sprintf("analog:nrl:%s:%d", s.sourceKey, s.callStreamID), s.callSourceDMRID, nil, true)
+	}
+}
+
+func (s *nrlSession) emitAudioChunk(frontend, streamID string, sourceDMRID uint32, pcm []int16, ended bool) {
+	if s.bridge == nil || s.bridge.audioHandler == nil || streamID == "" {
+		return
+	}
+	s.bridge.audioHandler(AnalogAudioEvent{
+		StreamID:    streamID,
+		Frontend:    frontend,
+		SourceKey:   s.sourceKey,
+		SourceDMRID: sourceDMRID,
+		PCM:         append([]int16(nil), pcm...),
+		Ended:       ended,
+	})
+}
+
+func ulawSamplesToPCM16(in []byte) []int16 {
+	pcm := make([]int16, 0, len(in))
+	for _, sample := range in {
+		pcm = append(pcm, int16(ulaw2linear(sample)))
+	}
+	return pcm
+}
+
+func alawSamplesToPCM16(in []byte) []int16 {
+	pcm := make([]int16, 0, len(in))
+	for _, sample := range in {
+		pcm = append(pcm, int16(alaw2linear(sample)))
+	}
+	return pcm
 }
 
 func (s *nrlSession) buildHyteraAnalogPacket(voice []byte) ([]byte, *net.UDPAddr, bool) {

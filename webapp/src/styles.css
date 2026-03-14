@@ -133,6 +133,13 @@ button, input, textarea, select {
   margin: 8px 0 0;
 }
 
+.audio-error-banner {
+  border-radius: 18px;
+  padding: 12px 16px;
+  color: #ffd6e4;
+  border-color: rgba(255, 141, 184, 0.32);
+}
+
 .eyebrow {
   margin: 0 0 10px;
   letter-spacing: 0.28em;
@@ -154,7 +161,8 @@ button, input, textarea, select {
 .tab-row,
 .locale-switch,
 .topbar-actions,
-.account-actions {
+.account-actions,
+.call-panel-actions {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;

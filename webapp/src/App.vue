@@ -24,12 +24,19 @@ const busy = ref(false)
 const message = ref('')
 const nowTick = ref(Date.now())
 const wsConnected = ref(false)
+const audioEnabled = ref(false)
+const audioAvailable = ref(false)
+const audioStreamCount = ref(0)
+const audioError = ref('')
 const deviceSearch = ref('')
 
 let snapshotIntervalId = null
 let durationIntervalId = null
 let ws = null
 let wsReconnectTimer = null
+let audioContext = null
+let audioMasterGain = null
+const audioStreams = new Map()
 const authSessionHintKey = 'auth_session_hint'
 
 const isAdmin = computed(() => user.value?.role === 'admin')
@@ -354,6 +361,95 @@ function scheduleReconnect() {
   }, 1200)
 }
 
+async function enableAudio() {
+  try {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtor) throw new Error(t('audio.unsupported'))
+    if (!audioContext) {
+      audioContext = new AudioCtor()
+      audioMasterGain = audioContext.createGain()
+      audioMasterGain.gain.value = 1
+      audioMasterGain.connect(audioContext.destination)
+    }
+    await audioContext.resume()
+    audioEnabled.value = true
+    audioError.value = ''
+  } catch (error) {
+    audioEnabled.value = false
+    audioError.value = error?.message || t('audio.enableFailed')
+  }
+}
+
+async function disableAudio() {
+  audioEnabled.value = false
+  audioStreamCount.value = 0
+  audioStreams.clear()
+  if (audioContext) {
+    try {
+      await audioContext.close()
+    } catch {}
+  }
+  audioContext = null
+  audioMasterGain = null
+}
+
+function cleanupAudioStreams(now = performance.now()) {
+  for (const [streamId, state] of audioStreams.entries()) {
+    if (state.ended && state.nextTime <= (audioContext?.currentTime || 0)+0.05) {
+      audioStreams.delete(streamId)
+      continue
+    }
+    if (now - state.lastSeenAt > 5000) {
+      audioStreams.delete(streamId)
+    }
+  }
+  audioStreamCount.value = audioStreams.size
+}
+
+function decodePCM16Base64(value) {
+  const raw = window.atob(String(value || ''))
+  const bytes = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i)
+  const view = new DataView(bytes.buffer)
+  const out = new Float32Array(bytes.length / 2)
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = view.getInt16(i * 2, true) / 32768
+  }
+  return out
+}
+
+function handleAudioChunk(payload) {
+  audioAvailable.value = true
+  if (!payload?.streamId) return
+  const state = audioStreams.get(payload.streamId) || { nextTime: 0, lastSeenAt: 0, ended: false }
+  state.lastSeenAt = performance.now()
+  state.ended = Boolean(payload.ended)
+  audioStreams.set(payload.streamId, state)
+  cleanupAudioStreams(state.lastSeenAt)
+
+  if (!audioEnabled.value || !payload.pcm || !audioContext || !audioMasterGain) return
+
+  const pcm = decodePCM16Base64(payload.pcm)
+  if (!pcm.length) return
+
+  const sampleRate = Number(payload.sampleRate || 8000)
+  const buffer = audioContext.createBuffer(1, pcm.length, sampleRate)
+  buffer.getChannelData(0).set(pcm)
+
+  const source = audioContext.createBufferSource()
+  source.buffer = buffer
+  source.connect(audioMasterGain)
+
+  const leadTime = 0.02
+  const now = audioContext.currentTime
+  const queued = state.nextTime && state.nextTime > now ? state.nextTime : now + leadTime
+  state.nextTime = queued
+  if (state.nextTime-now > 0.4) state.nextTime = now + leadTime
+  source.start(state.nextTime)
+  state.nextTime += buffer.duration
+  source.onended = () => cleanupAudioStreams()
+}
+
 function closeWS() {
   wsConnected.value = false
   if (wsReconnectTimer) {
@@ -386,6 +482,7 @@ function connectWS() {
     if (payload.type === 'device_updated' && payload.device) upsertDevice(payload.device)
     if (payload.type === 'device_deleted' && payload.device) removeDevice(payload.device)
     if (payload.type === 'call_recorded' && payload.call) appendCall(payload.call)
+    if (payload.type === 'audio_chunk') handleAudioChunk(payload)
   }
   ws.onclose = () => {
     wsConnected.value = false
@@ -541,6 +638,7 @@ onMounted(async () => {
   connectWS()
   durationIntervalId = window.setInterval(() => {
     nowTick.value = Date.now()
+    cleanupAudioStreams()
   }, 1000)
   snapshotIntervalId = window.setInterval(() => {
     loadSnapshot().catch(() => {})
@@ -551,6 +649,7 @@ onUnmounted(() => {
   if (durationIntervalId) window.clearInterval(durationIntervalId)
   if (snapshotIntervalId) window.clearInterval(snapshotIntervalId)
   closeWS()
+  disableAudio()
 })
 </script>
 
@@ -583,6 +682,10 @@ onUnmounted(() => {
           <button class="primary" @click="openAuth('register')">{{ t('app.register') }}</button>
         </template>
       </div>
+    </section>
+
+    <section v-if="audioError" class="glass audio-error-banner">
+      {{ audioError }}
     </section>
 
     <section class="metrics-row">
@@ -647,7 +750,14 @@ onUnmounted(() => {
                 <h3>{{ t('app.calls') }}</h3>
                 <p class="hint">{{ t('call.priorityHint') }}</p>
               </div>
-              <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
+              <div class="call-panel-actions">
+                <button :class="audioEnabled ? 'primary' : 'ghost'" @click="audioEnabled ? disableAudio() : enableAudio()">
+                  {{ audioEnabled ? t('audio.disable') : t('audio.enable') }}
+                  <span class="muted-inline">· {{ audioAvailable ? t('audio.available') : t('audio.waiting') }}</span>
+                  <span class="muted-inline">· {{ t('audio.streams') }} {{ audioStreamCount }}</span>
+                </button>
+                <span class="call-count-badge">{{ activeCalls.length }} {{ t('call.live') }}</span>
+              </div>
             </div>
             <article v-if="liveHeadlineCall" class="call-hero live">
               <div class="call-hero-top">

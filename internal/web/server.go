@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hicaoc/ipsc2mmdvm/internal/audio"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
 	"github.com/hicaoc/ipsc2mmdvm/internal/registry"
 	"github.com/hicaoc/ipsc2mmdvm/internal/routing"
@@ -29,6 +30,7 @@ const sessionCookieName = "ipsc2mmdvm_session"
 type Server struct {
 	registry *registry.Service
 	router   *routing.SubscriptionManager
+	audio    *audio.Hub
 	runtime  RuntimeInfo
 	upgrader websocket.Upgrader
 	mux      *http.ServeMux
@@ -65,7 +67,7 @@ type snapshotPayload struct {
 	Runtime   RuntimeInfo                            `json:"runtime"`
 }
 
-func NewServer(reg *registry.Service, router *routing.SubscriptionManager, cfg *config.Config) *Server {
+func NewServer(reg *registry.Service, router *routing.SubscriptionManager, audioHub *audio.Hub, cfg *config.Config) *Server {
 	runtime := RuntimeInfo{
 		WebListenAddress: cfg.Web.Address,
 		LocalID:          cfg.Local.ID,
@@ -93,6 +95,7 @@ func NewServer(reg *registry.Service, router *routing.SubscriptionManager, cfg *
 	s := &Server{
 		registry: reg,
 		router:   router,
+		audio:    audioHub,
 		runtime:  runtime,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
@@ -589,6 +592,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	events, unsubscribe := s.registry.Subscribe()
 	defer unsubscribe()
+	var (
+		audioEvents      <-chan audio.Chunk
+		unsubscribeAudio func()
+	)
+	if s.audio != nil {
+		audioEvents, unsubscribeAudio = s.audio.Subscribe()
+		defer unsubscribeAudio()
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -607,6 +618,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := conn.WriteJSON(event); err != nil {
+				return
+			}
+		case chunk, ok := <-audioEvents:
+			if audioEvents == nil {
+				continue
+			}
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(chunk); err != nil {
 				return
 			}
 		case <-done:

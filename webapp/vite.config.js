@@ -7,6 +7,8 @@ const devTarget = 'http://js.nrlptt.com:9201'
 export default defineConfig({
   plugins: [vue()],
   server: {
+    host: '0.0.0.0',
+    port: 5173,
     proxy: {
       '/api': {
         target: devTarget,

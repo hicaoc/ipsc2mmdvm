@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/configulator"
+	"github.com/hicaoc/ipsc2mmdvm/internal/audio"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
 	"github.com/hicaoc/ipsc2mmdvm/internal/dmrid"
 	"github.com/hicaoc/ipsc2mmdvm/internal/hytera"
@@ -118,6 +119,14 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		return !dev.Disabled
 	}
 	var handleIngress func(frontend, source string, pkt proto.Packet, addr *net.UDPAddr)
+	audioHub := audio.NewHub()
+	dmrAudioPool, err := audio.NewDMRDecoderPool(audioHub, 4)
+	if err != nil {
+		return fmt.Errorf("failed to initialize DMR audio decoder pool: %w", err)
+	}
+	defer func() {
+		_ = dmrAudioPool.Close()
+	}()
 
 	// Create one MMDVM client per configured network (DMR master).
 	// All clients share a single outbound timeslot manager so that
@@ -298,7 +307,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	if cfg.Web.Enabled && cfg.Web.Address != "" {
 		webSrv = &http.Server{
 			Addr:    cfg.Web.Address,
-			Handler: webui.NewServer(registrySvc, groupRouter, cfg).Handler(),
+			Handler: webui.NewServer(registrySvc, groupRouter, audioHub, cfg).Handler(),
 		}
 		go func() {
 			slog.Info("Starting web management server", "address", cfg.Web.Address)
@@ -646,6 +655,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 				"frontend", frontend, "source", source, "slot", pkt.Slot, "streamID", pkt.StreamID)
 			return
 		}
+		dmrAudioPool.HandlePacket(frontend, recordSourceKey, pkt)
 		if pkt.Src != 0 {
 			privateRouter.Remember(uint32(pkt.Src), recordSourceKey, time.Now().UTC())
 		}
@@ -709,6 +719,19 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			if _, _, err := registrySvc.RecordCall(record, call.Ended); err != nil {
 				slog.Warn("failed to record NRL call", "sourceKey", call.SourceKey, "ended", call.Ended, "error", err)
 			}
+		})
+		hyteraServer.SetAnalogAudioHandler(func(event hytera.AnalogAudioEvent) {
+			audioHub.Publish(audio.Chunk{
+				StreamID:    event.StreamID,
+				Frontend:    event.Frontend,
+				SourceKey:   event.SourceKey,
+				SourceDMRID: event.SourceDMRID,
+				CallType:    "analog",
+				SampleRate:  audio.SampleRate8000,
+				Channels:    1,
+				PCM:         audio.PCM16Bytes(event.PCM),
+				Ended:       event.Ended,
+			})
 		})
 		hyteraServer.SetPacketHandler(func(pkt proto.Packet, addr *net.UDPAddr) {
 			handleIngress("hytera", addr.String(), pkt, addr)
