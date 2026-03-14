@@ -1359,6 +1359,10 @@ select:focus {
     padding: 14px;
   }
 
+  .content {
+    padding: 14px;
+  }
+
   .sidebar-head {
     padding-bottom: 10px;
   }
@@ -1517,10 +1521,6 @@ select:focus {
     width: 100%;
   }
 
-  .content {
-    padding: 18px;
-  }
-
   .modal-backdrop {
     padding: 12px;
     align-items: end;
@@ -1565,6 +1565,11 @@ select:focus {
   .content,
   .sidebar {
     border-radius: 22px;
+  }
+
+  .content,
+  .sidebar {
+    padding: 12px;
   }
 
   .topbar h1 {

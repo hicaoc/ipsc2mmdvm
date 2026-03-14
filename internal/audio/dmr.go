@@ -12,6 +12,13 @@ import (
 )
 
 const dmrStreamIdleTimeout = 3 * time.Second
+const dmrDecodeQueueSize = 256
+
+type dmrDecodeTask struct {
+	frontend  string
+	sourceKey string
+	pkt       proto.Packet
+}
 
 type DMRDecoderPool struct {
 	hub        *Hub
@@ -20,6 +27,9 @@ type DMRDecoderPool struct {
 	mu     sync.Mutex
 	idle   []*md380vocoder.Vocoder
 	active map[string]*dmrStreamDecoder
+
+	queue chan dmrDecodeTask
+	wg    sync.WaitGroup
 }
 
 type dmrStreamDecoder struct {
@@ -35,6 +45,7 @@ func NewDMRDecoderPool(hub *Hub, warmSpares int) (*DMRDecoderPool, error) {
 		hub:        hub,
 		warmSpares: warmSpares,
 		active:     map[string]*dmrStreamDecoder{},
+		queue:      make(chan dmrDecodeTask, dmrDecodeQueueSize),
 	}
 	for range warmSpares {
 		v, err := md380vocoder.NewVocoder()
@@ -44,12 +55,18 @@ func NewDMRDecoderPool(hub *Hub, warmSpares int) (*DMRDecoderPool, error) {
 		}
 		pool.idle = append(pool.idle, v)
 	}
+	pool.wg.Add(1)
+	go pool.run()
 	return pool, nil
 }
 
 func (p *DMRDecoderPool) Close() error {
 	if p == nil {
 		return nil
+	}
+	if p.queue != nil {
+		close(p.queue)
+		p.wg.Wait()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -65,6 +82,27 @@ func (p *DMRDecoderPool) Close() error {
 }
 
 func (p *DMRDecoderPool) HandlePacket(frontend, sourceKey string, pkt proto.Packet) {
+	if p == nil || p.hub == nil || sourceKey == "" {
+		return
+	}
+	select {
+	case p.queue <- dmrDecodeTask{
+		frontend:  frontend,
+		sourceKey: sourceKey,
+		pkt:       pkt,
+	}:
+	default:
+	}
+}
+
+func (p *DMRDecoderPool) run() {
+	defer p.wg.Done()
+	for task := range p.queue {
+		p.processPacket(task.frontend, task.sourceKey, task.pkt)
+	}
+}
+
+func (p *DMRDecoderPool) processPacket(frontend, sourceKey string, pkt proto.Packet) {
 	if p == nil || p.hub == nil || sourceKey == "" {
 		return
 	}
