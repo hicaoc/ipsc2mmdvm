@@ -1321,11 +1321,15 @@ select:focus {
 
   .workspace,
   .account-layout,
-  .metrics-row,
   .overview-grid,
   .runtime-kv-list,
   .runtime-kv-list-sidebar {
     grid-template-columns: 1fr;
+  }
+
+  .metrics-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
   }
 
   .topbar {
@@ -1369,6 +1373,23 @@ select:focus {
 
   .runtime-panel-sidebar {
     margin-top: 12px;
+  }
+
+  .runtime-kv-list-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .runtime-kv-list-sidebar .kv-row,
+  .runtime-kv-list-sidebar.kv-list.compact .kv-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    align-items: flex-start;
+    padding: 12px;
+  }
+
+  .runtime-kv-list-sidebar .kv-row:first-child {
+    grid-column: 1 / -1;
   }
 
   .sidebar-nav button {
@@ -1550,12 +1571,28 @@ select:focus {
     font-size: clamp(28px, 10vw, 42px);
   }
 
+  .metrics-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
   .metric-card {
     padding: 18px;
   }
 
   .metric-card strong {
     font-size: 30px;
+  }
+
+  .runtime-kv-list-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .runtime-kv-list-sidebar .kv-row,
+  .runtime-kv-list-sidebar.kv-list.compact .kv-row {
+    padding: 10px 12px;
+    border-radius: 14px;
   }
 
   .call-hero-duration {

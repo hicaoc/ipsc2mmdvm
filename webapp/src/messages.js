@@ -52,6 +52,8 @@ export const messages = {
       onlineDevices: '在线设备',
       calls: '最近呼叫',
       activeCalls: '当前通话',
+      browserClients: '在线浏览器',
+      audioSubscribers: '音频订阅',
       systemInfo: '系统信息',
       welcome: '欢迎回来'
     },
@@ -168,6 +170,8 @@ export const messages = {
       onlineDevices: 'Online',
       calls: 'Recent Calls',
       activeCalls: 'Active Calls',
+      browserClients: 'Browser Clients',
+      audioSubscribers: 'Audio Subscribers',
       systemInfo: 'System Info',
       welcome: 'Welcome back'
     },

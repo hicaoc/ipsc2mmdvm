@@ -37,6 +37,11 @@ type Server struct {
 
 	sessionMu sync.RWMutex
 	sessions  map[string]sessionState
+
+	wsMu         sync.RWMutex
+	wsClients    int
+	audioClients int
+	runtimeSubs  map[chan RuntimeInfo]struct{}
 }
 
 type sessionState struct {
@@ -48,6 +53,8 @@ type RuntimeInfo struct {
 	AccessURL          string   `json:"accessUrl"`
 	WebsocketURL       string   `json:"websocketUrl"`
 	WebListenAddress   string   `json:"webListenAddress"`
+	BrowserClients     int      `json:"browserClients"`
+	AudioSubscribers   int      `json:"audioSubscribers"`
 	LocalID            uint32   `json:"localId"`
 	LocalCallsign      string   `json:"localCallsign"`
 	IPSCListen         string   `json:"ipscListen"`
@@ -100,8 +107,9 @@ func NewServer(reg *registry.Service, router *routing.SubscriptionManager, audio
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
 		},
-		mux:      http.NewServeMux(),
-		sessions: map[string]sessionState{},
+		mux:         http.NewServeMux(),
+		sessions:    map[string]sessionState{},
+		runtimeSubs: map[chan RuntimeInfo]struct{}{},
 	}
 	s.routes()
 	return s
@@ -577,6 +585,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	s.trackWSClient(1)
+	defer s.trackWSClient(-1)
+
 	user, err := s.currentUser(r)
 	authenticated := err == nil
 	initial := map[string]any{"type": "snapshot"}
@@ -595,18 +606,39 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	var (
 		audioEvents      <-chan audio.Chunk
 		unsubscribeAudio func()
+		runtimeEvents    <-chan RuntimeInfo
+		unsubscribeRT    func()
 	)
-	if s.audio != nil {
-		audioEvents, unsubscribeAudio = s.audio.Subscribe()
-		defer unsubscribeAudio()
-	}
+	runtimeEvents, unsubscribeRT = s.subscribeRuntime()
+	defer unsubscribeRT()
+	defer func() {
+		if unsubscribeAudio != nil {
+			unsubscribeAudio()
+			s.trackAudioClient(-1)
+		}
+	}()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
 				return
+			}
+			switch strings.TrimSpace(string(data)) {
+			case "audio_subscribe":
+				if s.audio != nil && audioEvents == nil {
+					audioEvents, unsubscribeAudio = s.audio.Subscribe()
+					s.trackAudioClient(1)
+				}
+			case "audio_unsubscribe":
+				if unsubscribeAudio != nil {
+					unsubscribeAudio()
+					unsubscribeAudio = nil
+					audioEvents = nil
+					s.trackAudioClient(-1)
+				}
 			}
 		}
 	}()
@@ -630,15 +662,95 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := conn.WriteJSON(chunk); err != nil {
 				return
 			}
+		case runtime, ok := <-runtimeEvents:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":    "runtime_updated",
+				"runtime": runtime,
+			}); err != nil {
+				return
+			}
 		case <-done:
 			return
 		}
 	}
 }
 
+func (s *Server) subscribeRuntime() (<-chan RuntimeInfo, func()) {
+	ch := make(chan RuntimeInfo, 8)
+	s.wsMu.Lock()
+	s.runtimeSubs[ch] = struct{}{}
+	s.wsMu.Unlock()
+	return ch, func() {
+		s.wsMu.Lock()
+		if _, ok := s.runtimeSubs[ch]; ok {
+			delete(s.runtimeSubs, ch)
+			close(ch)
+		}
+		s.wsMu.Unlock()
+	}
+}
+
+func (s *Server) trackWSClient(delta int) {
+	s.wsMu.Lock()
+	s.wsClients += delta
+	if s.wsClients < 0 {
+		s.wsClients = 0
+	}
+	runtime := s.runtimeSnapshotLocked()
+	subs := make([]chan RuntimeInfo, 0, len(s.runtimeSubs))
+	for ch := range s.runtimeSubs {
+		subs = append(subs, ch)
+	}
+	s.wsMu.Unlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- runtime:
+		default:
+		}
+	}
+}
+
+func (s *Server) trackAudioClient(delta int) {
+	s.wsMu.Lock()
+	s.audioClients += delta
+	if s.audioClients < 0 {
+		s.audioClients = 0
+	}
+	runtime := s.runtimeSnapshotLocked()
+	subs := make([]chan RuntimeInfo, 0, len(s.runtimeSubs))
+	for ch := range s.runtimeSubs {
+		subs = append(subs, ch)
+	}
+	s.wsMu.Unlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- runtime:
+		default:
+		}
+	}
+}
+
+func (s *Server) runtimeSnapshot() RuntimeInfo {
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	return s.runtimeSnapshotLocked()
+}
+
+func (s *Server) runtimeSnapshotLocked() RuntimeInfo {
+	runtime := s.runtime
+	runtime.BrowserClients = s.wsClients
+	runtime.AudioSubscribers = s.audioClients
+	return runtime
+}
+
 func (s *Server) snapshotPayload(baseURL string, user registry.User) snapshotPayload {
 	snap := s.registry.Snapshot()
-	runtime := s.runtime
+	runtime := s.runtimeSnapshot()
 	if baseURL != "" {
 		runtime.AccessURL = baseURL
 		if strings.HasPrefix(baseURL, "https://") {
@@ -667,7 +779,7 @@ func (s *Server) snapshotPayload(baseURL string, user registry.User) snapshotPay
 
 func (s *Server) publicSnapshotPayload(baseURL string) snapshotPayload {
 	snap := s.registry.Snapshot()
-	runtime := s.runtime
+	runtime := s.runtimeSnapshot()
 	if baseURL != "" {
 		runtime.AccessURL = baseURL
 		if strings.HasPrefix(baseURL, "https://") {

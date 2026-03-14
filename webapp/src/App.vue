@@ -312,6 +312,16 @@ function applySnapshot(nextSnapshot) {
   rebuildDeviceDrafts()
 }
 
+function updateRuntime(runtime) {
+  snapshot.value = {
+    ...snapshot.value,
+    runtime: {
+      ...(snapshot.value.runtime || {}),
+      ...(runtime || {})
+    }
+  }
+}
+
 function upsertDevice(device) {
   const devices = [...snapshot.value.devices]
   const index = devices.findIndex((item) => item.id === device.id)
@@ -374,6 +384,7 @@ async function enableAudio() {
     await audioContext.resume()
     audioEnabled.value = true
     audioError.value = ''
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send('audio_subscribe')
   } catch (error) {
     audioEnabled.value = false
     audioError.value = error?.message || t('audio.enableFailed')
@@ -381,6 +392,7 @@ async function enableAudio() {
 }
 
 async function disableAudio() {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send('audio_unsubscribe')
   audioEnabled.value = false
   audioStreamCount.value = 0
   audioStreams.clear()
@@ -475,6 +487,7 @@ function connectWS() {
   }
   ws.onopen = () => {
     wsConnected.value = true
+    if (audioEnabled.value) ws.send('audio_subscribe')
   }
   ws.onmessage = (event) => {
     const payload = JSON.parse(event.data)
@@ -482,6 +495,7 @@ function connectWS() {
     if (payload.type === 'device_updated' && payload.device) upsertDevice(payload.device)
     if (payload.type === 'device_deleted' && payload.device) removeDevice(payload.device)
     if (payload.type === 'call_recorded' && payload.call) appendCall(payload.call)
+    if (payload.type === 'runtime_updated' && payload.runtime) updateRuntime(payload.runtime)
     if (payload.type === 'audio_chunk') handleAudioChunk(payload)
   }
   ws.onclose = () => {
@@ -704,6 +718,14 @@ onUnmounted(() => {
       <article class="metric-card glass">
         <span>{{ t('dashboard.activeCalls') }}</span>
         <strong>{{ activeCalls.length }}</strong>
+      </article>
+      <article class="metric-card glass">
+        <span>{{ t('dashboard.browserClients') }}</span>
+        <strong>{{ snapshot.runtime?.browserClients || 0 }}</strong>
+      </article>
+      <article class="metric-card glass">
+        <span>{{ t('dashboard.audioSubscribers') }}</span>
+        <strong>{{ snapshot.runtime?.audioSubscribers || 0 }}</strong>
       </article>
     </section>
 
