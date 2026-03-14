@@ -1,6 +1,5 @@
 config.yaml
 ipsc2mmdvm
 webapp/node_modules/
-internal/web/dist
-internal/web/static
+internal/web/dist 
 .claude/settings.json 

@@ -21,7 +21,7 @@ import (
 	"github.com/hicaoc/ipsc2mmdvm/internal/routing"
 )
 
-//go:embed static/* dist/*
+//go:embed dist/*
 var staticFS embed.FS
 
 const sessionCookieName = "ipsc2mmdvm_session"
@@ -735,12 +735,8 @@ func canManageDevice(user registry.User, device registry.Device) bool {
 }
 
 func (s *Server) uiFS() (fs.FS, string, error) {
-	if _, err := fs.Stat(staticFS, "dist/assets"); err == nil {
-		sub, err := fs.Sub(staticFS, "dist")
-		return sub, "dist", err
-	}
-	sub, err := fs.Sub(staticFS, "static")
-	return sub, "static", err
+	sub, err := fs.Sub(staticFS, "dist")
+	return sub, "dist", err
 }
 
 func sanitizeUser(user registry.User) registry.User {
