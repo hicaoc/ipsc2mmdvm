@@ -199,14 +199,14 @@ func (b *nrlBridge) ensureSession(sourceKey string, cfg NRLPeerConfig) (*nrlSess
 		return nil, err
 	}
 	s := &nrlSession{
-		bridge:      b,
-		sourceKey:   sourceKey,
-		cfg:         cfg,
-		conn:        conn,
-		ulawBuffer:  make([]byte, 0, hyteraAnalogFrameGroup*2),
-		voiceQueue:  make(chan []byte, 256),
+		bridge:         b,
+		sourceKey:      sourceKey,
+		cfg:            cfg,
+		conn:           conn,
+		ulawBuffer:     make([]byte, 0, hyteraAnalogFrameGroup*2),
+		voiceQueue:     make(chan []byte, 256),
 		lastActivityAt: time.Now(),
-		done:        make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.readLoop()
@@ -262,7 +262,11 @@ func (b *nrlBridge) tickSessions() {
 			b.closeSession(s.sourceKey)
 			continue
 		}
-		_ = s.sendHeartbeat()
+		if err := s.sendHeartbeat(); err == nil {
+			s.mu.Lock()
+			s.lastActivityAt = now
+			s.mu.Unlock()
+		}
 	}
 }
 
@@ -647,7 +651,7 @@ func normalizeNRLCallsign(callsign string) string {
 func ulawChunkToAlaw(in []byte) []byte {
 	out := make([]byte, len(in))
 	for i := range in {
-		out[i] = Linear2Alaw(ulaw2linear(in[i]))
+		out[i] = Linear2Alaw(ulaw2linear(in[i]) * 3)
 	}
 	return out
 }
