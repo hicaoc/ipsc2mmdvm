@@ -105,11 +105,11 @@ func (m *wsAudioMixer) Flush(now time.Time) []byte {
 		return nil
 	}
 
-	out := make([]byte, mixedAudioFrameSamples*2)
+	outSamples := make([]int16, mixedAudioFrameSamples)
 	for i, sample := range mix {
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(clampPCM16(sample)))
+		outSamples[i] = clampPCM16(sample)
 	}
-	return out
+	return audio.ALawBytes(outSamples)
 }
 
 func decodePCM16(raw []byte) []int16 {

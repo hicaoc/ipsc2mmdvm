@@ -37,3 +37,29 @@ func TestBridgeActivateReturnsWithEndpointHandler(t *testing.T) {
 	}
 }
 
+func TestBridgeMatchesResolvedConfig(t *testing.T) {
+	cfg := DeviceConfig{
+		SourceKey:  "nrl-virtual:test",
+		Callsign:   "D2TEST",
+		ServerAddr: "127.0.0.1",
+		ServerPort: 60050,
+		Slot:       1,
+		TargetTG:   46025,
+	}
+	bridge := NewBridge(func(sourceKey string) (DeviceConfig, bool) {
+		return cfg, true
+	}, func(string, proto.Packet) {})
+	defer bridge.Close()
+
+	if err := bridge.Activate(cfg.SourceKey); err != nil {
+		t.Fatalf("activate returned error: %v", err)
+	}
+	if !bridge.MatchesResolvedConfig(cfg.SourceKey) {
+		t.Fatal("expected active bridge config to match resolved config")
+	}
+
+	cfg.ServerPort = 60051
+	if bridge.MatchesResolvedConfig(cfg.SourceKey) {
+		t.Fatal("expected config mismatch after resolved endpoint changed")
+	}
+}

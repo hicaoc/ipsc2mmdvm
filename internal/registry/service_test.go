@@ -668,3 +668,15 @@ func TestServiceRecordCallNRLUsesSingleActivePerSourceKey(t *testing.T) {
 		t.Fatalf("expected first call ID to remain active, got %#v", snap.Calls[0])
 	}
 }
+
+func TestCallIdleTimeoutUsesShorterTimeoutForMMDVM(t *testing.T) {
+	if got := callIdleTimeout("mmdvm"); got != 3*time.Second {
+		t.Fatalf("expected mmdvm timeout 3s, got %v", got)
+	}
+	if got := callIdleTimeout("nrl"); got != 4*time.Second {
+		t.Fatalf("expected nrl timeout 4s, got %v", got)
+	}
+	if got := callIdleTimeout("moto"); got != 12*time.Second {
+		t.Fatalf("expected default timeout 12s, got %v", got)
+	}
+}

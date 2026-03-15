@@ -1122,12 +1122,12 @@ func audioTargetKeyForChunk(chunk audio.Chunk) string {
 		if chunk.DstID == 0 {
 			return ""
 		}
-		return "private:" + strconv.FormatUint(uint64(chunk.DstID), 10) + ":" + strconv.Itoa(chunk.Slot)
+		return "private:" + strconv.FormatUint(uint64(chunk.DstID), 10)
 	default:
 		if chunk.DstID == 0 {
 			return ""
 		}
-		return "group:" + strconv.FormatUint(uint64(chunk.DstID), 10) + ":" + strconv.Itoa(chunk.Slot)
+		return "group:" + strconv.FormatUint(uint64(chunk.DstID), 10)
 	}
 }
 

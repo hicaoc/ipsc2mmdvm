@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"sync"
 	"time"
+
+	nrlcodec "github.com/hicaoc/ipsc2mmdvm/internal/nrl"
 )
 
 const SampleRate8000 = 8000
@@ -85,6 +87,17 @@ func PCM16Bytes(samples []int16) []byte {
 	out := make([]byte, len(samples)*2)
 	for i, sample := range samples {
 		binary.LittleEndian.PutUint16(out[i*2:], uint16(sample))
+	}
+	return out
+}
+
+func ALawBytes(samples []int16) []byte {
+	if len(samples) == 0 {
+		return nil
+	}
+	out := make([]byte, len(samples))
+	for i, sample := range samples {
+		out[i] = nrlcodec.LinearToAlaw(sample)
 	}
 	return out
 }

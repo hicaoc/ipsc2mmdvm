@@ -12,6 +12,8 @@ import (
 
 const recentCallLimit = 50
 
+const callSweepInterval = time.Second
+
 type Service struct {
 	store *Store
 	dmrid *dmrid.Resolver
@@ -346,7 +348,7 @@ func (s *Service) EnsureAdminUser(user User) (User, bool, error) {
 
 func (s *Service) sweeper() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(callSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -410,10 +412,14 @@ func (s *Service) expireCalls() {
 }
 
 func callIdleTimeout(frontend string) time.Duration {
-	if frontend == "nrl" {
+	switch frontend {
+	case "mmdvm":
+		return 3 * time.Second
+	case "nrl":
 		return 4 * time.Second
+	default:
+		return 12 * time.Second
 	}
-	return 12 * time.Second
 }
 
 func (s *Service) finishActiveCall(key string, active activeCallState, endedAt time.Time) (CallRecord, error) {

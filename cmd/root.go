@@ -452,8 +452,12 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			call.FromIP = addr.IP.String()
 			call.FromPort = addr.Port
 		}
-		if _, _, err := registrySvc.RecordCall(call, isTerminator); err != nil {
+		_, inserted, err := registrySvc.RecordCall(call, isTerminator)
+		if err != nil {
 			slog.Warn("failed to record call", "frontend", frontend, "source", sourceKey, "error", err)
+			return
+		}
+		if !inserted {
 			return
 		}
 		slog.Warn("call recorded",
@@ -642,33 +646,55 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 						return
 					}
 					if event.Device == nil {
-						slog.Warn("skipping non-device registry event for NRL bridge", "type", event.Type)
+						slog.Debug("ignoring non-device registry event for NRL bridge", "type", event.Type)
 						continue
 					}
 					dev := event.Device
 					if dev.Protocol != "nrl-virtual" {
 						continue
 					}
-					slog.Warn("received registry device event for NRL bridge",
-						"type", event.Type,
-						"sourceKey", dev.SourceKey,
-						"disabled", dev.Disabled,
-						"server", dev.NRLServerAddr)
 					if event.Type == "device_deleted" || dev.Disabled || strings.TrimSpace(dev.NRLServerAddr) == "" {
-						slog.Warn("device update deactivating NRL virtual link",
-							"sourceKey", dev.SourceKey,
-							"type", event.Type,
-							"disabled", dev.Disabled,
-							"server", dev.NRLServerAddr)
-						nrlBridge.Deactivate(dev.SourceKey)
+						if nrlBridge.IsActive(dev.SourceKey) {
+							slog.Warn("device update deactivating NRL virtual link",
+								"sourceKey", dev.SourceKey,
+								"type", event.Type,
+								"disabled", dev.Disabled,
+								"server", dev.NRLServerAddr)
+							nrlBridge.Deactivate(dev.SourceKey)
+						} else {
+							slog.Debug("ignoring NRL device update because link is already inactive",
+								"sourceKey", dev.SourceKey,
+								"type", event.Type,
+								"disabled", dev.Disabled,
+								"server", dev.NRLServerAddr)
+						}
 						continue
 					}
-					slog.Warn("device update activating NRL virtual link",
-						"sourceKey", dev.SourceKey,
-						"type", event.Type,
-						"callsign", dev.Callsign,
-						"server", dev.NRLServerAddr,
-						"port", dev.NRLServerPort)
+					if nrlBridge.MatchesResolvedConfig(dev.SourceKey) {
+						slog.Debug("ignoring NRL device update without bridge config change",
+							"sourceKey", dev.SourceKey,
+							"type", event.Type,
+							"callsign", dev.Callsign,
+							"server", dev.NRLServerAddr,
+							"port", dev.NRLServerPort)
+						continue
+					}
+					if nrlBridge.IsActive(dev.SourceKey) {
+						slog.Warn("device update reloading active NRL virtual link",
+							"sourceKey", dev.SourceKey,
+							"type", event.Type,
+							"callsign", dev.Callsign,
+							"server", dev.NRLServerAddr,
+							"port", dev.NRLServerPort)
+						nrlBridge.Deactivate(dev.SourceKey)
+					} else {
+						slog.Warn("device update activating NRL virtual link",
+							"sourceKey", dev.SourceKey,
+							"type", event.Type,
+							"callsign", dev.Callsign,
+							"server", dev.NRLServerAddr,
+							"port", dev.NRLServerPort)
+					}
 					if err := nrlBridge.Activate(dev.SourceKey); err != nil {
 						slog.Warn("failed to activate NRL virtual link after device update", "sourceKey", dev.SourceKey, "error", err)
 					}

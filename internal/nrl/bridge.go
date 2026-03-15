@@ -35,6 +35,20 @@ type DeviceConfig struct {
 	ColorCode    uint8
 }
 
+func (c DeviceConfig) equal(other DeviceConfig) bool {
+	return c.SourceKey == other.SourceKey &&
+		c.Name == other.Name &&
+		c.Callsign == other.Callsign &&
+		c.DMRID == other.DMRID &&
+		c.ServerAddr == other.ServerAddr &&
+		c.ServerPort == other.ServerPort &&
+		c.LocalUDPPort == other.LocalUDPPort &&
+		c.SSID == other.SSID &&
+		c.Slot == other.Slot &&
+		c.TargetTG == other.TargetTG &&
+		c.ColorCode == other.ColorCode
+}
+
 type Bridge struct {
 	resolveConfig func(sourceKey string) (DeviceConfig, bool)
 	handlePacket  func(sourceKey string, pkt proto.Packet)
@@ -390,6 +404,23 @@ func (b *Bridge) IsActive(sourceKey string) bool {
 	defer b.mu.Unlock()
 	_, ok := b.sessions[sourceKey]
 	return ok
+}
+
+func (b *Bridge) MatchesResolvedConfig(sourceKey string) bool {
+	if b == nil || sourceKey == "" {
+		return false
+	}
+	cfg, ok := b.resolveConfig(sourceKey)
+	if !ok {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	sess := b.sessions[sourceKey]
+	if sess == nil {
+		return false
+	}
+	return sess.cfg.equal(cfg)
 }
 
 func (s *session) handleDMRPacket(pkt proto.Packet) bool {

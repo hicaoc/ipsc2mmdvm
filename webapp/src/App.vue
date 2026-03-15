@@ -39,6 +39,7 @@ let audioMasterGain = null
 let mixedAudioNextTime = 0
 const audioStreams = new Map()
 const authSessionHintKey = 'auth_session_hint'
+const aLawFloatTable = buildALawFloatTable()
 
 const isAdmin = computed(() => user.value?.role === 'admin')
 const onlineCount = computed(() => snapshot.value.devices.filter((device) => device.online).length)
@@ -257,18 +258,16 @@ function audioTargetKey(call) {
     return sourceKey ? `analog:${sourceKey}` : ''
   }
   if (!call.dstId) return ''
-  const slot = Number(call.slot || 0)
-  if (call.callType === 'private') return `private:${call.dstId}:${slot}`
-  return `group:${call.dstId}:${slot}`
+  if (call.callType === 'private') return `private:${call.dstId}`
+  return `group:${call.dstId}`
 }
 
 function audioTargetLabel(call) {
   if (!call) return '-'
   if (call.callType === 'analog') return `${t('call.analog')} · ${callSourceDevice(call)}`
   const id = call.dstId || '-'
-  const slot = call.slot || '-'
-  if (call.callType === 'private') return `${t('call.private')} ${id} · TS${slot}`
-  return `TG ${id} · TS${slot}`
+  if (call.callType === 'private') return `${t('call.private')} ${id}`
+  return `TG ${id}`
 }
 
 function isAudioTargetSelected(targetKey) {
@@ -608,9 +607,8 @@ function chunkTargetKey(payload) {
   }
   const dstId = Number(payload.dstId || 0)
   if (!dstId) return ''
-  const slot = Number(payload.slot || 0)
-  if (payload.callType === 'private') return `private:${dstId}:${slot}`
-  return `group:${dstId}:${slot}`
+  if (payload.callType === 'private') return `private:${dstId}`
+  return `group:${dstId}`
 }
 
 function cleanupAudioStreams(now = performance.now()) {
@@ -675,6 +673,29 @@ function decodePCM16Bytes(buffer) {
   return out
 }
 
+function decodeALawBytes(buffer) {
+  const bytes = new Uint8Array(buffer)
+  const out = new Float32Array(bytes.length)
+  for (let i = 0; i < bytes.length; i += 1) {
+    out[i] = aLawFloatTable[bytes[i]]
+  }
+  return out
+}
+
+function buildALawFloatTable() {
+  const table = new Float32Array(256)
+  for (let i = 0; i < 256; i += 1) {
+    let value = i ^ 0x55
+    let exponent = (value & 0x70) >> 4
+    let mantissa = value & 0x0f
+    if (exponent > 0) mantissa += 16
+    let sample = (mantissa << 4) + 0x08
+    if (exponent > 1) sample <<= (exponent - 1)
+    table[i] = ((value & 0x80) !== 0 ? sample : -sample) / 32768
+  }
+  return table
+}
+
 function schedulePCMPlayback(pcm, sampleRate, nextTimeRef = null) {
   if (!pcm.length || !audioContext || !audioMasterGain) return
 
@@ -702,7 +723,7 @@ function handleMixedAudioFrame(buffer) {
   audioAvailable.value = true
   if (!audioEnabled.value || !audioContext || !audioMasterGain) return
 
-  const pcm = decodePCM16Bytes(buffer)
+  const pcm = decodeALawBytes(buffer)
   if (!pcm.length) return
 
   schedulePCMPlayback(pcm, 8000, { get nextTime() { return mixedAudioNextTime }, set nextTime(value) { mixedAudioNextTime = value } })
