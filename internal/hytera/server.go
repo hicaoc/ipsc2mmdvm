@@ -17,6 +17,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/enums"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/elements"
+	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
 	"github.com/hicaoc/ipsc2mmdvm/internal/dmr/bptc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
@@ -2240,15 +2241,82 @@ func packetColorCode(pkt proto.Packet, fallback uint8) uint8 {
 
 func packetColorCodeWithSource(pkt proto.Packet, fallback uint8) (uint8, string) {
 	cc := fallback & 0x0F
-	var burst layer2.Burst
-	burst.DecodeFromBytes(pkt.DMRData)
-	if burst.HasSlotType {
-		return uint8(burst.SlotType.ColorCode) & 0x0F, "slotType"
+	if slotCC, ok := packetSlotTypeColorCode(pkt.DMRData); ok {
+		return slotCC, "slotType"
 	}
-	if burst.HasEmbeddedSignalling {
-		return uint8(burst.EmbeddedSignalling.ColorCode) & 0x0F, "embedded"
+	if embeddedCC, ok := packetEmbeddedColorCode(pkt.DMRData); ok {
+		return embeddedCC, "embedded"
 	}
 	return cc, "fallback"
+}
+
+func packetSlotTypeColorCode(data [33]byte) (uint8, bool) {
+	bits := packetBits(data)
+	if !packetHasDataSync(bits) {
+		return 0, false
+	}
+	var slotBits [20]byte
+	for i := 0; i < 10; i++ {
+		if bits[98+i] {
+			slotBits[i] = 1
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if bits[156+i] {
+			slotBits[10+i] = 1
+		}
+	}
+	slotType := pdu.NewSlotTypeFromBits(slotBits)
+	return uint8(slotType.ColorCode) & 0x0F, true
+}
+
+func packetEmbeddedColorCode(data [33]byte) (uint8, bool) {
+	bits := packetBits(data)
+	if !packetHasEmbeddedSignalling(bits) {
+		return 0, false
+	}
+	var embeddedBits [16]byte
+	for i := 0; i < 8; i++ {
+		if bits[108+i] {
+			embeddedBits[i] = 1
+		}
+	}
+	for i := 0; i < 8; i++ {
+		if bits[148+i] {
+			embeddedBits[8+i] = 1
+		}
+	}
+	embedded := pdu.NewEmbeddedSignallingFromBits(embeddedBits)
+	return uint8(embedded.ColorCode) & 0x0F, true
+}
+
+func packetBits(data [33]byte) [264]bool {
+	var bits [264]bool
+	for i := 0; i < 264; i++ {
+		bits[i] = (data[i/8] & (1 << (7 - (i % 8)))) != 0
+	}
+	return bits
+}
+
+func packetHasDataSync(bits [264]bool) bool {
+	sync := packetSyncPattern(bits)
+	return sync == enums.Tdma1Data || sync == enums.Tdma2Data || sync == enums.MsSourcedData || sync == enums.BsSourcedData
+}
+
+func packetHasEmbeddedSignalling(bits [264]bool) bool {
+	return packetSyncPattern(bits) == enums.EmbeddedSignallingPattern
+}
+
+func packetSyncPattern(bits [264]bool) enums.SyncPattern {
+	var syncBytes [6]byte
+	for i := 0; i < 6; i++ {
+		for j := 0; j < 8; j++ {
+			if bits[108+(i*8)+j] {
+				syncBytes[i] |= 1 << (7 - j)
+			}
+		}
+	}
+	return enums.SyncPatternFromBytes(syncBytes)
 }
 
 func normalizeMotoColorCode(cc uint8, source string, fallback uint8) (uint8, string) {

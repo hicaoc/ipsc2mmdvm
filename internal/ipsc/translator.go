@@ -382,7 +382,6 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	// Bytes 38-49: Full LC data (12 bytes)
 	// Extract from the DMR burst data — the header burst carries a Voice LC Header
 	// which contains FLCO, FID, ServiceOpt, Dst, Src, CRC
-	t.burst.DecodeFromBytes(pkt.DMRData)
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])
 
@@ -412,7 +411,6 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState)
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
 
 	// Full LC data
-	t.burst.DecodeFromBytes(pkt.DMRData)
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])
 
@@ -443,7 +441,6 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060) // Data size (96 bits = 12 bytes)
 
 	// Bytes 38-49: Extract data from DMR burst via BPTC decode
-	t.burst.DecodeFromBytes(pkt.DMRData)
 	// Use extractFullLCBytes which constructs from packet fields
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])

@@ -589,6 +589,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.EnableWriteCompression(true)
 
 	s.trackWSClient(1)
 	defer s.trackWSClient(-1)
@@ -617,6 +618,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	runtimeEvents, unsubscribeRT = s.subscribeRuntime()
 	defer unsubscribeRT()
 	audioTargets := map[string]struct{}{}
+	audioMixer := newWSAudioMixer()
+	audioTicker := time.NewTicker(mixedAudioFrameDuration)
+	defer audioTicker.Stop()
 	defer func() {
 		if unsubscribeAudio != nil {
 			unsubscribeAudio()
@@ -667,16 +671,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				if target == "" {
 					s.trackAudioTargets(-len(audioTargets))
 					audioTargets = map[string]struct{}{}
+					audioMixer.Reset()
 				} else {
 					if _, ok := audioTargets[target]; ok {
 						delete(audioTargets, target)
 						s.trackAudioTargets(-1)
+						audioMixer.RemoveTarget(target)
 					}
 				}
 				if len(audioTargets) == 0 && unsubscribeAudio != nil {
 					unsubscribeAudio()
 					unsubscribeAudio = nil
 					audioEvents = nil
+					audioMixer.Reset()
 				}
 			}
 		case event, ok := <-events:
@@ -700,9 +707,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if _, ok := audioTargets[target]; !ok {
 				continue
 			}
-			if err := conn.WriteJSON(chunk); err != nil {
-				return
-			}
+			audioMixer.Add(chunk, target)
 		case runtime, ok := <-runtimeEvents:
 			if !ok {
 				return
@@ -711,6 +716,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				"type":    "runtime_updated",
 				"runtime": runtime,
 			}); err != nil {
+				return
+			}
+		case <-audioTicker.C:
+			if len(audioTargets) == 0 {
+				continue
+			}
+			frame := audioMixer.Flush(time.Now().UTC())
+			if len(frame) == 0 {
+				continue
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 				return
 			}
 		case <-done:

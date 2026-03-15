@@ -35,6 +35,7 @@ let ws = null
 let wsReconnectTimer = null
 let audioContext = null
 let audioMasterGain = null
+let mixedAudioNextTime = 0
 const audioStreams = new Map()
 const authSessionHintKey = 'auth_session_hint'
 
@@ -488,6 +489,7 @@ async function disableAudio() {
   audioAvailable.value = false
   selectedAudioTargets.value = []
   audioStreams.clear()
+  mixedAudioNextTime = 0
   if (audioContext) {
     try {
       await audioContext.close()
@@ -563,6 +565,48 @@ function decodePCM16Base64(value) {
   return out
 }
 
+function decodePCM16Bytes(buffer) {
+  const view = new DataView(buffer)
+  const out = new Float32Array(Math.floor(buffer.byteLength / 2))
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = view.getInt16(i * 2, true) / 32768
+  }
+  return out
+}
+
+function schedulePCMPlayback(pcm, sampleRate, nextTimeRef = null) {
+  if (!pcm.length || !audioContext || !audioMasterGain) return
+
+  const buffer = audioContext.createBuffer(1, pcm.length, sampleRate)
+  buffer.getChannelData(0).set(pcm)
+
+  const source = audioContext.createBufferSource()
+  source.buffer = buffer
+  source.connect(audioMasterGain)
+
+  const leadTime = 0.02
+  const now = audioContext.currentTime
+  let queued = nextTimeRef && nextTimeRef.nextTime > now ? nextTimeRef.nextTime : now + leadTime
+  if (queued - now > 0.4) queued = now + leadTime
+  source.start(queued)
+
+  if (nextTimeRef) {
+    nextTimeRef.nextTime = queued + buffer.duration
+  } else {
+    mixedAudioNextTime = queued + buffer.duration
+  }
+}
+
+function handleMixedAudioFrame(buffer) {
+  audioAvailable.value = true
+  if (!audioEnabled.value || !audioContext || !audioMasterGain) return
+
+  const pcm = decodePCM16Bytes(buffer)
+  if (!pcm.length) return
+
+  schedulePCMPlayback(pcm, 8000, { get nextTime() { return mixedAudioNextTime }, set nextTime(value) { mixedAudioNextTime = value } })
+}
+
 function handleAudioChunk(payload) {
   audioAvailable.value = true
   if (!payload?.streamId) return
@@ -579,23 +623,7 @@ function handleAudioChunk(payload) {
 
   const pcm = decodePCM16Base64(payload.pcm)
   if (!pcm.length) return
-
-  const sampleRate = Number(payload.sampleRate || 8000)
-  const buffer = audioContext.createBuffer(1, pcm.length, sampleRate)
-  buffer.getChannelData(0).set(pcm)
-
-  const source = audioContext.createBufferSource()
-  source.buffer = buffer
-  source.connect(audioMasterGain)
-
-  const leadTime = 0.02
-  const now = audioContext.currentTime
-  const queued = state.nextTime && state.nextTime > now ? state.nextTime : now + leadTime
-  state.nextTime = queued
-  if (state.nextTime-now > 0.4) state.nextTime = now + leadTime
-  source.start(state.nextTime)
-  state.nextTime += buffer.duration
-  source.onended = () => cleanupAudioStreams()
+  schedulePCMPlayback(pcm, Number(payload.sampleRate || 8000), state)
 }
 
 function closeWS() {
@@ -616,6 +644,7 @@ function connectWS() {
   if (ws) return
   try {
     ws = new WebSocket(wsURL())
+    ws.binaryType = 'arraybuffer'
   } catch {
     ws = null
     scheduleReconnect()
@@ -628,6 +657,10 @@ function connectWS() {
     }
   }
   ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      handleMixedAudioFrame(event.data)
+      return
+    }
     const payload = JSON.parse(event.data)
     if (payload.type === 'snapshot' && payload.snapshot) applySnapshot(payload.snapshot)
     if (payload.type === 'device_updated' && payload.device) upsertDevice(payload.device)
