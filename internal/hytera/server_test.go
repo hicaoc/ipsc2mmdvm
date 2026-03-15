@@ -19,6 +19,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	l3elements "github.com/USA-RedDragon/dmrgo/dmr/layer3/elements"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	internalbptc "github.com/hicaoc/ipsc2mmdvm/internal/dmr/bptc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 )
@@ -566,8 +567,8 @@ func TestStandardizeMotoLCPacketUsesETSIHeaderAndTerminator(t *testing.T) {
 	src := uint(4604111)
 	dst := uint(46025)
 	cc := uint8(1)
-	wantHeaderLC := buildStandardLCBytesForDataType(src, dst, true, 0x20, elements.DataTypeVoiceLCHeader)
-	wantTermLC := buildStandardLCBytesForDataType(src, dst, true, 0x20, elements.DataTypeTerminatorWithLC)
+	wantHeaderLC := intdmr.BuildStandardLCBytesForDataType(src, dst, true, 0x20, intdmr.DataTypeVoiceLCHeader)
+	wantTermLC := intdmr.BuildStandardLCBytesForDataType(src, dst, true, 0x20, intdmr.DataTypeTerminatorWithLC)
 
 	header := proto.Packet{
 		Signature:   "DMRD",
@@ -661,7 +662,7 @@ func TestResolveMotoServiceOptionsDefaultsAndCachesFromHeader(t *testing.T) {
 		FrameType:   2,
 		DTypeOrVSeq: 1,
 	}
-	lc := buildStandardLCBytesWithSO(header.Src, header.Dst, header.GroupCall, 0x20)
+	lc := intdmr.BuildStandardLCBytesWithSO(header.Src, header.Dst, header.GroupCall, 0x20)
 	header.DMRData = internalbptc.BuildLCDataBurst(lc, uint8(elements.DataTypeVoiceLCHeader), 1)
 	so, source = resolveMotoServiceOptions(header, st)
 	if so != 0x20 || source != "packet-lc" {
@@ -679,13 +680,13 @@ func TestLC12CurrentEncoderMatchesBMForHeaderAndTerminator(t *testing.T) {
 	dst := uint(46025)
 	so := uint8(0x00)
 
-	headerLC := buildStandardLCBytesForDataType(src, dst, true, so, elements.DataTypeVoiceLCHeader)
+	headerLC := intdmr.BuildStandardLCBytesForDataType(src, dst, true, so, intdmr.DataTypeVoiceLCHeader)
 	bmHeader := [12]byte{0x00, 0x00, 0x00, 0x00, 0xB3, 0xC9, 0x46, 0x31, 0xBC, 0x08, 0x30, 0x88}
 	if headerLC != bmHeader {
 		t.Fatalf("header lc12 mismatch\n got=% X\nwant=% X", headerLC, bmHeader)
 	}
 
-	termLC := buildStandardLCBytesForDataType(src, dst, true, so, elements.DataTypeTerminatorWithLC)
+	termLC := intdmr.BuildStandardLCBytesForDataType(src, dst, true, so, intdmr.DataTypeTerminatorWithLC)
 	bmTerm := [12]byte{0x00, 0x00, 0x00, 0x00, 0xB3, 0xC9, 0x46, 0x31, 0xBC, 0x07, 0x3F, 0x87}
 	if termLC != bmTerm {
 		t.Fatalf("terminator lc12 mismatch\n got=% X\nwant=% X", termLC, bmTerm)
@@ -988,7 +989,7 @@ func replayMotoToHyteraPure(s *Server, in []proto.Packet) ([]proto.Packet, error
 			header.FrameType = 2
 			header.DTypeOrVSeq = 1
 			header.DMRData = layer2.BuildLCDataBurst(
-				buildStandardLCBytes(packet.Src, packet.Dst, packet.GroupCall),
+				intdmr.BuildStandardLCBytes(packet.Src, packet.Dst, packet.GroupCall),
 				elements.DataTypeVoiceLCHeader,
 				motoCC&0x0F,
 			)
@@ -1495,7 +1496,7 @@ func TestCompareGeneratedHeaderAgainstBMReturnedHeader(t *testing.T) {
 		t.Fatal("no BM returned voice LC header found")
 	}
 
-	lc := buildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
+	lc := intdmr.BuildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
 	generated := layer2.BuildLCDataBurst(lc, elements.DataTypeVoiceLCHeader, 1)
 	if generated == bmHeader.DMRData {
 		t.Logf("generated header equals BM returned header")
@@ -1538,7 +1539,7 @@ func TestCompareGeneratedHeaderAgainstBMReturnedHeaderDistance(t *testing.T) {
 		t.Fatal("no BM returned voice LC header found")
 	}
 
-	lc := buildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
+	lc := intdmr.BuildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
 	generated := layer2.BuildLCDataBurst(lc, elements.DataTypeVoiceLCHeader, 1)
 
 	if len(generated) != len(bmHeader.DMRData) {
@@ -1642,7 +1643,7 @@ func TestDumpBMHeaderHexAndFullLCDetail(t *testing.T) {
 
 	bmDataArr := bmHeader.DMRData
 	bmData := bmDataArr[:]
-	standardLC := buildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
+	standardLC := intdmr.BuildStandardLCBytes(bmHeader.Src, bmHeader.Dst, bmHeader.GroupCall)
 	stdData := layer2.BuildLCDataBurst(standardLC, elements.DataTypeVoiceLCHeader, 1)
 	newData := buildLCDataBurstWithInternalBPTC(standardLC, elements.DataTypeVoiceLCHeader, 1)
 
@@ -3046,20 +3047,8 @@ func decodeEmbeddedLC9FromFragments(frags [4][4]byte) (lc9 [9]byte, rxCRC byte, 
 	for i := 0; i < 5; i++ {
 		rxCRC |= (bits[72+i] & 1) << (4 - i)
 	}
-	calcCRC = embeddedLCCRC5ForHyteraTest(bits[:72])
+	calcCRC = intdmr.EmbeddedLCCRC5Residual(bits[:72])
 	return lc9, rxCRC, calcCRC
-}
-
-func embeddedLCCRC5ForHyteraTest(bits []byte) byte {
-	var reg byte
-	for _, bit := range bits {
-		msb := (reg >> 4) & 1
-		reg = ((reg << 1) & 0x1F) | (bit & 1)
-		if msb == 1 {
-			reg ^= 0x15
-		}
-	}
-	return (reg & 0x1F) ^ 0x1F
 }
 
 func splitBMDMRDPackets(t *testing.T, packets []tcpdumpPacket) (outbound []proto.Packet, returned []proto.Packet, seenSrc map[string]int) {

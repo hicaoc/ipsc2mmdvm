@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -16,9 +15,8 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/dmr/enums"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
-	"github.com/USA-RedDragon/dmrgo/dmr/layer2/elements"
-	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	"github.com/hicaoc/ipsc2mmdvm/internal/dmr/bptc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
@@ -59,10 +57,6 @@ const (
 	hyteraBurstInterval       = 20 * time.Millisecond
 	hyteraSyncHeaderInterval  = 5 * time.Millisecond
 
-	// ETSI TS 102 361-1 Annex B.3.2:
-	// Full LC parity bytes are RS(12,9) encoded then XOR-masked by data type.
-	fullLCParityMaskVoiceHeader byte = 0x96
-	fullLCParityMaskTerminator  byte = 0x99
 )
 
 var errIgnoredPacket = errors.New("packet ignored")
@@ -713,11 +707,11 @@ func standardizeMotoLCPacketWithSO(pkt proto.Packet, colorCode uint8, so uint8) 
 
 	switch {
 	case pkt.FrameType == 2 && pkt.DTypeOrVSeq == 1:
-		lc := buildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, elements.DataTypeVoiceLCHeader)
-		out.DMRData = bptc.BuildLCDataBurst(lc, uint8(elements.DataTypeVoiceLCHeader), cc)
+		lc := intdmr.BuildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, intdmr.DataTypeVoiceLCHeader)
+		out.DMRData = bptc.BuildLCDataBurst(lc, uint8(intdmr.DataTypeVoiceLCHeader), cc)
 	case pkt.FrameType == 2 && pkt.DTypeOrVSeq == 2:
-		lc := buildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, elements.DataTypeTerminatorWithLC)
-		out.DMRData = bptc.BuildLCDataBurst(lc, uint8(elements.DataTypeTerminatorWithLC), cc)
+		lc := intdmr.BuildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, intdmr.DataTypeTerminatorWithLC)
+		out.DMRData = bptc.BuildLCDataBurst(lc, uint8(intdmr.DataTypeTerminatorWithLC), cc)
 	}
 	return out
 }
@@ -727,8 +721,8 @@ func (s *Server) sendSynthesizedMotoHeader(pkt proto.Packet, motoCC uint8, so ui
 	header.FrameType = 2
 	header.DTypeOrVSeq = 1
 	header.DMRData = bptc.BuildLCDataBurst(
-		buildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, elements.DataTypeVoiceLCHeader),
-		uint8(elements.DataTypeVoiceLCHeader),
+		intdmr.BuildStandardLCBytesForDataType(pkt.Src, pkt.Dst, pkt.GroupCall, so, intdmr.DataTypeVoiceLCHeader),
+		uint8(intdmr.DataTypeVoiceLCHeader),
 		motoCC&0x0F,
 	)
 
@@ -760,86 +754,6 @@ func (s *Server) sendSynthesizedMotoHeader(pkt proto.Packet, motoCC uint8, so ui
 		"so", fmt.Sprintf("0x%02X", so),
 		"repeats", motoHeaderRepeats)
 	return true
-}
-
-func buildStandardLCBytes(src, dst uint, groupCall bool) [12]byte {
-	return buildStandardLCBytesForDataType(src, dst, groupCall, 0x20, elements.DataTypeVoiceLCHeader)
-}
-
-func buildStandardLCBytesWithSO(src, dst uint, groupCall bool, so uint8) [12]byte {
-	return buildStandardLCBytesForDataType(src, dst, groupCall, so, elements.DataTypeVoiceLCHeader)
-}
-
-func buildStandardLCBytesForDataType(src, dst uint, groupCall bool, so uint8, dataType elements.DataType) [12]byte {
-	var lc [12]byte
-	flco := enums.FLCOUnitToUnitVoiceChannelUser
-	if src > math.MaxInt || dst > math.MaxInt {
-		slog.Error("Hytera LC address out of range", "src", src, "dst", dst)
-		return lc
-	}
-	if groupCall {
-		flco = enums.FLCOGroupVoiceChannelUser
-	}
-	lc[0] = byte(flco) & 0x3F // PF=0, R=0
-	lc[1] = byte(enums.StandardizedFID)
-	lc[2] = so
-	lc[3] = byte(dst >> 16)
-	lc[4] = byte(dst >> 8)
-	lc[5] = byte(dst)
-	lc[6] = byte(src >> 16)
-	lc[7] = byte(src >> 8)
-	lc[8] = byte(src)
-	parity := reedSolomon129Parity(lc[:9])
-	mask := fullLCParityMaskForDataType(dataType)
-	lc[9] = parity[0] ^ mask
-	lc[10] = parity[1] ^ mask
-	lc[11] = parity[2] ^ mask
-	return lc
-}
-
-func fullLCParityMaskForDataType(dataType elements.DataType) byte {
-	switch dataType {
-	case elements.DataTypeVoiceLCHeader:
-		return fullLCParityMaskVoiceHeader
-	case elements.DataTypeTerminatorWithLC:
-		return fullLCParityMaskTerminator
-	default:
-		return 0x00
-	}
-}
-
-// reedSolomon129Parity computes RS(12,9) parity bytes over 9 data bytes.
-// Coefficients follow ETSI TS 102 361-1 Annex B.3.2 for Full LC.
-func reedSolomon129Parity(data []byte) [3]byte {
-	var parity [3]byte
-	if len(data) != 9 {
-		return parity
-	}
-	for i := 0; i < 9; i++ {
-		feedback := data[i] ^ parity[0]
-		parity[0] = parity[1] ^ gf256Mul(feedback, 0x0E)
-		parity[1] = parity[2] ^ gf256Mul(feedback, 0x38)
-		parity[2] = gf256Mul(feedback, 0x40)
-	}
-	return parity
-}
-
-func gf256Mul(a, b byte) byte {
-	var p byte
-	aa := a
-	bb := b
-	for i := 0; i < 8; i++ {
-		if (bb & 1) != 0 {
-			p ^= aa
-		}
-		hi := (aa & 0x80) != 0
-		aa <<= 1
-		if hi {
-			aa ^= 0x1D
-		}
-		bb >>= 1
-	}
-	return p
 }
 
 func logMotoHyteraHeaderLC(src, dst uint, groupCall bool, lc [12]byte) {
@@ -2249,82 +2163,13 @@ func packetColorCode(pkt proto.Packet, fallback uint8) uint8 {
 
 func packetColorCodeWithSource(pkt proto.Packet, fallback uint8) (uint8, string) {
 	cc := fallback & 0x0F
-	if slotCC, ok := packetSlotTypeColorCode(pkt.DMRData); ok {
+	if slotCC, ok := intdmr.BurstSlotTypeColorCode(pkt.DMRData); ok {
 		return slotCC, "slotType"
 	}
-	if embeddedCC, ok := packetEmbeddedColorCode(pkt.DMRData); ok {
+	if embeddedCC, ok := intdmr.BurstEmbeddedColorCode(pkt.DMRData); ok {
 		return embeddedCC, "embedded"
 	}
 	return cc, "fallback"
-}
-
-func packetSlotTypeColorCode(data [33]byte) (uint8, bool) {
-	bits := packetBits(data)
-	if !packetHasDataSync(bits) {
-		return 0, false
-	}
-	var slotBits [20]byte
-	for i := 0; i < 10; i++ {
-		if bits[98+i] {
-			slotBits[i] = 1
-		}
-	}
-	for i := 0; i < 10; i++ {
-		if bits[156+i] {
-			slotBits[10+i] = 1
-		}
-	}
-	slotType := pdu.NewSlotTypeFromBits(slotBits)
-	return uint8(slotType.ColorCode) & 0x0F, true
-}
-
-func packetEmbeddedColorCode(data [33]byte) (uint8, bool) {
-	bits := packetBits(data)
-	if !packetHasEmbeddedSignalling(bits) {
-		return 0, false
-	}
-	var embeddedBits [16]byte
-	for i := 0; i < 8; i++ {
-		if bits[108+i] {
-			embeddedBits[i] = 1
-		}
-	}
-	for i := 0; i < 8; i++ {
-		if bits[148+i] {
-			embeddedBits[8+i] = 1
-		}
-	}
-	embedded := pdu.NewEmbeddedSignallingFromBits(embeddedBits)
-	return uint8(embedded.ColorCode) & 0x0F, true
-}
-
-func packetBits(data [33]byte) [264]bool {
-	var bits [264]bool
-	for i := 0; i < 264; i++ {
-		bits[i] = (data[i/8] & (1 << (7 - (i % 8)))) != 0
-	}
-	return bits
-}
-
-func packetHasDataSync(bits [264]bool) bool {
-	sync := packetSyncPattern(bits)
-	return sync == enums.Tdma1Data || sync == enums.Tdma2Data || sync == enums.MsSourcedData || sync == enums.BsSourcedData
-}
-
-func packetHasEmbeddedSignalling(bits [264]bool) bool {
-	return packetSyncPattern(bits) == enums.EmbeddedSignallingPattern
-}
-
-func packetSyncPattern(bits [264]bool) enums.SyncPattern {
-	var syncBytes [6]byte
-	for i := 0; i < 6; i++ {
-		for j := 0; j < 8; j++ {
-			if bits[108+(i*8)+j] {
-				syncBytes[i] |= 1 << (7 - j)
-			}
-		}
-	}
-	return enums.SyncPatternFromBytes(syncBytes)
 }
 
 func normalizeMotoColorCode(cc uint8, source string, fallback uint8) (uint8, string) {

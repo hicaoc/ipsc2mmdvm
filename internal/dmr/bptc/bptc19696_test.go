@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
@@ -482,20 +483,8 @@ func decodeEmbeddedLCFromFragments(frags [4][4]byte) (lc9 [9]byte, rxCRC byte, c
 	for i := 0; i < 5; i++ {
 		rxCRC |= (bits[72+i] & 1) << (4 - i)
 	}
-	calcCRC = embeddedLCCRC5ForTest(bits[:72])
+	calcCRC = intdmr.EmbeddedLCCRC5Residual(bits[:72])
 	return lc9, rxCRC, calcCRC
-}
-
-func embeddedLCCRC5ForTest(bits []byte) byte {
-	var reg byte
-	for _, bit := range bits {
-		msb := (reg >> 4) & 1
-		reg = ((reg << 1) & 0x1F) | (bit & 1)
-		if msb == 1 {
-			reg ^= 0x15
-		}
-	}
-	return (reg & 0x1F) ^ 0x1F
 }
 
 func TestDecodeEmbeddedLCFromFragments_InverseCheck(t *testing.T) {
@@ -535,7 +524,7 @@ func encodeEmbeddedLCForTest(src, dst uint, groupCall bool) [4][4]byte {
 			bits[i*8+j] = (lc[i] >> (7 - j)) & 1
 		}
 	}
-	crc := embeddedLCCRC5ForTest(bits[:72])
+	crc := intdmr.EmbeddedLCCRC5Residual(bits[:72])
 	for i := 0; i < 5; i++ {
 		bits[72+i] = (crc >> (4 - i)) & 1
 	}

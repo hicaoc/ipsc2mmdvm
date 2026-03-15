@@ -13,7 +13,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/elements"
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
 	l3elements "github.com/USA-RedDragon/dmrgo/dmr/layer3/elements"
-	"github.com/USA-RedDragon/dmrgo/dmr/vocoder"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	"github.com/hicaoc/ipsc2mmdvm/internal/dmr/bptc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
 	mmdvm "github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
@@ -463,7 +463,11 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 	}
 
 	// Extract the 19-byte FEC-decoded AMBE payload from the 3 vocoder frames
-	ambeData := vocoder.PackAMBEVoice(t.burst.VoiceData.Frames)
+	var frames [3][49]byte
+	for i := range t.burst.VoiceData.Frames {
+		frames[i] = t.burst.VoiceData.Frames[i].DecodedBits
+	}
+	ambeData := intdmr.PackAMBEVoiceFrames(frames)
 
 	// Determine slot type byte
 	slotBurst := ipscBurstSlot2
@@ -913,11 +917,13 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	copy(ambeBytes[:], ipscData[33:52])
 
 	// Unpack into 3 VocoderFrames (49 bits each)
-	frames := vocoder.UnpackAMBEVoice(ambeBytes)
+	frames := intdmr.UnpackAMBEVoiceFrames(ambeBytes)
 
 	// Build a vocoder PDU
 	var vc pdu.Vocoder
-	vc.Frames = frames
+	for i := range frames {
+		vc.Frames[i].DecodedBits = frames[i]
+	}
 
 	// The vocoder Encode() FEC-encodes the 3×49 bit frames back to 3×72 = 216 bits
 	voiceBits := vc.Encode()

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
-	dmrvocoder "github.com/USA-RedDragon/dmrgo/dmr/vocoder"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 	md380vocoder "github.com/hicaoc/md380_vocoder_cgo"
 )
@@ -426,7 +426,7 @@ func (s *session) handleDMRPacket(pkt proto.Packet) bool {
 	state.lastSeen = now
 	state.srcDMRID = uint32(pkt.Src)
 	for _, frame := range burst.VoiceData.Frames {
-		pcm, err := state.vocoder.Decode(ambeFrameBytes(frame))
+		pcm, err := state.vocoder.Decode(ambeFrameBytes(frame.DecodedBits))
 		if err != nil {
 			continue
 		}
@@ -636,8 +636,8 @@ func (s *session) emitTerminatorLocked(state *nrlEncodeState) {
 	s.bridge.handlePacket(s.cfg.SourceKey, newTerminatorPacket(state.srcID, s.cfg.TargetTG, s.cfg.Slot, s.cfg.ColorCode, state.streamID, state.sequence))
 }
 
-func ambeFrameBytes(frame dmrvocoder.VocoderFrame) []byte {
-	bits := frame.Encode()
+func ambeFrameBytes(decodedBits [49]byte) []byte {
+	bits := intdmr.EncodeAMBEFrame(decodedBits)
 	out := make([]byte, md380vocoder.AMBEFrameSize)
 	for i, bit := range bits {
 		if bit == 1 {

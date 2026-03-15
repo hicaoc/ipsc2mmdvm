@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
-	dmrvocoder "github.com/USA-RedDragon/dmrgo/dmr/vocoder"
+	intdmr "github.com/hicaoc/ipsc2mmdvm/internal/dmr"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
 	md380vocoder "github.com/hicaoc/md380_vocoder_cgo"
 )
@@ -133,7 +133,7 @@ func (p *DMRDecoderPool) processPacket(frontend, sourceKey string, pkt proto.Pac
 
 	samples := make([]int16, 0, md380vocoder.PCMFrameSize*len(burst.VoiceData.Frames))
 	for _, frame := range burst.VoiceData.Frames {
-		pcm, err := decoder.Decode(ambeFrameBytes(frame))
+		pcm, err := decoder.Decode(ambeFrameBytes(frame.DecodedBits))
 		if err != nil {
 			return
 		}
@@ -222,8 +222,8 @@ func (p *DMRDecoderPool) expireIdle(now time.Time) {
 	}
 }
 
-func ambeFrameBytes(frame dmrvocoder.VocoderFrame) []byte {
-	bits := frame.Encode()
+func ambeFrameBytes(decodedBits [49]byte) []byte {
+	bits := intdmr.EncodeAMBEFrame(decodedBits)
 	out := make([]byte, md380vocoder.AMBEFrameSize)
 	for i, bit := range bits {
 		if bit == 1 {
