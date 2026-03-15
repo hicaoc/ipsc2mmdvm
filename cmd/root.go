@@ -17,12 +17,13 @@ import (
 	"github.com/USA-RedDragon/configulator"
 	"github.com/hicaoc/ipsc2mmdvm/internal/audio"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
-	"github.com/hicaoc/ipsc2mmdvm/internal/dmrid"
+	dmridpkg "github.com/hicaoc/ipsc2mmdvm/internal/dmrid"
 	"github.com/hicaoc/ipsc2mmdvm/internal/hytera"
 	"github.com/hicaoc/ipsc2mmdvm/internal/ipsc"
 	"github.com/hicaoc/ipsc2mmdvm/internal/metrics"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm"
 	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/hicaoc/ipsc2mmdvm/internal/nrl"
 	"github.com/hicaoc/ipsc2mmdvm/internal/registry"
 	"github.com/hicaoc/ipsc2mmdvm/internal/repeater"
 	"github.com/hicaoc/ipsc2mmdvm/internal/routing"
@@ -61,6 +62,14 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	slog.Info("frontend startup configuration",
+		"ipscEnabled", cfg.IPSC.Enabled,
+		"ipscPort", cfg.IPSC.Port,
+		"hyteraEnabled", cfg.Hytera.Enabled,
+		"hyteraP2PPort", cfg.Hytera.P2PPort,
+		"hyteraDMRPort", cfg.Hytera.DMRPort,
+		"webEnabled", cfg.Web.Enabled,
+		"webAddress", cfg.Web.Address)
 
 	var logger *slog.Logger
 	switch cfg.LogLevel {
@@ -108,6 +117,10 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		_ = store.Close()
 		return fmt.Errorf("failed to initialize registry service: %w", err)
 	}
+	cfg.MMDVMClients, err = ensureManagedMMDVMClients(registrySvc, cfg.MMDVMClients)
+	if err != nil {
+		return fmt.Errorf("failed to load managed MMDVM clients: %w", err)
+	}
 	forwardAllowed := func(targetKey string) bool {
 		if targetKey == "" {
 			return false
@@ -138,10 +151,13 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	totalMMDVMNetworks := len(cfg.MMDVMClients) + len(cfg.MMDVMServers)
 	mmdvmNetworks := make([]mmdvm.Network, 0, totalMMDVMNetworks)
 	mmdvmUpstreams := map[string]mmdvm.Network{}
+	mmdvmUpstreamSourceKeys := map[string]string{}
 	var mmdvmServers []*mmdvm.MMDVMServer
 	for i := range cfg.MMDVMClients {
 		network := mmdvm.NewMMDVMClient(&cfg.MMDVMClients[i], m)
-		mmdvmUpstreams["mmdvm-upstream:"+cfg.MMDVMClients[i].Name] = network
+		sourceKey := mmdvm.SourceKey(&cfg.MMDVMClients[i])
+		mmdvmUpstreams[sourceKey] = network
+		mmdvmUpstreamSourceKeys[cfg.MMDVMClients[i].Name] = sourceKey
 		network.SetStatusHandler(func(status mmdvm.ClientStatus) {
 			host := status.Master
 			port := 0
@@ -183,7 +199,10 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		network.SetOutboundTSManager(outboundTSMgr)
 		err = network.Start()
 		if err != nil {
-			return fmt.Errorf("failed to start MMDVM client %q: %w", cfg.MMDVMClients[i].Name, err)
+			slog.Error("failed to start MMDVM client; skipping", "name", cfg.MMDVMClients[i].Name, "sourceKey", sourceKey, "error", err)
+			delete(mmdvmUpstreams, sourceKey)
+			delete(mmdvmUpstreamSourceKeys, cfg.MMDVMClients[i].Name)
+			continue
 		}
 		mmdvmNetworks = append(mmdvmNetworks, network)
 	}
@@ -239,7 +258,8 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		server.SetOutboundTSManager(outboundTSMgr)
 		err = server.Start()
 		if err != nil {
-			return fmt.Errorf("failed to start MMDVM server %q: %w", cfg.MMDVMServers[i].Name, err)
+			slog.Error("failed to start MMDVM server; skipping", "name", cfg.MMDVMServers[i].Name, "listen", cfg.MMDVMServers[i].Listen, "error", err)
+			continue
 		}
 		mmdvmNetworks = append(mmdvmNetworks, server)
 	}
@@ -247,6 +267,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	var (
 		ipscServer   *ipsc.IPSCServer
 		hyteraServer *hytera.Server
+		nrlBridge    *nrl.Bridge
 	)
 	ingressGuard := repeater.NewGuard()
 	groupRouter := routing.NewSubscriptionManager(15 * time.Minute)
@@ -303,11 +324,15 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			"email", admin.Email)
 	}
 
-	var webSrv *http.Server
+	var (
+		webSrv    *http.Server
+		webServer *webui.Server
+	)
 	if cfg.Web.Enabled && cfg.Web.Address != "" {
+		webServer = webui.NewServer(registrySvc, groupRouter, audioHub, cfg)
 		webSrv = &http.Server{
 			Addr:    cfg.Web.Address,
-			Handler: webui.NewServer(registrySvc, groupRouter, audioHub, cfg).Handler(),
+			Handler: webServer.Handler(),
 		}
 		go func() {
 			slog.Info("Starting web management server", "address", cfg.Web.Address)
@@ -365,7 +390,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 
 	dispatchToMMDVM := func(pkt proto.Packet, addr *net.UDPAddr) bool {
 		for _, network := range mmdvmNetworks {
-			if _, isServer := network.(*mmdvm.MMDVMServer); !isServer && !forwardAllowed("mmdvm-upstream:"+network.Name()) {
+			if _, isServer := network.(*mmdvm.MMDVMServer); !isServer && !forwardAllowed(mmdvmUpstreamSourceKeys[network.Name()]) {
 				continue
 			}
 			if network.MatchesPacket(pkt, false) {
@@ -373,7 +398,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		for _, network := range mmdvmNetworks {
-			if _, isServer := network.(*mmdvm.MMDVMServer); !isServer && !forwardAllowed("mmdvm-upstream:"+network.Name()) {
+			if _, isServer := network.(*mmdvm.MMDVMServer); !isServer && !forwardAllowed(mmdvmUpstreamSourceKeys[network.Name()]) {
 				continue
 			}
 			if network.MatchesPacket(pkt, true) {
@@ -429,7 +454,16 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		}
 		if _, _, err := registrySvc.RecordCall(call, isTerminator); err != nil {
 			slog.Warn("failed to record call", "frontend", frontend, "source", sourceKey, "error", err)
+			return
 		}
+		slog.Warn("call recorded",
+			"frontend", frontend,
+			"sourceKey", sourceKey,
+			"src", pkt.Src,
+			"dst", pkt.Dst,
+			"slot", slot,
+			"streamID", pkt.StreamID,
+			"ended", isTerminator)
 	}
 	motoSourceKey := func(source string, addr *net.UDPAddr) string {
 		if idx := strings.LastIndex(source, ":"); idx >= 0 {
@@ -455,8 +489,220 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 				return key
 			}
 		}
+		if sourceKey := mmdvmUpstreamSourceKeys[networkName]; sourceKey != "" {
+			return sourceKey
+		}
 		return "mmdvm-upstream:" + networkName
 	}
+	nrlBridge = nrl.NewBridge(func(sourceKey string) (nrl.DeviceConfig, bool) {
+		dev, ok := registrySvc.FindDevice(sourceKey)
+		if !ok || dev.Protocol != "nrl-virtual" || dev.Disabled || strings.TrimSpace(dev.NRLServerAddr) == "" {
+			return nrl.DeviceConfig{}, false
+		}
+		slot := dev.NRLSlot
+		if slot != 2 {
+			slot = 1
+		}
+		var targetTG uint32
+		subs := groupRouter.SnapshotDevice(sourceKey, time.Now().UTC())
+		for _, sub := range subs.Slots[routing.Slot(slot)] {
+			if sub.Kind == routing.SubscriptionStatic && sub.GroupID != 0 {
+				targetTG = sub.GroupID
+				break
+			}
+		}
+		serverPort := dev.NRLServerPort
+		if serverPort == 0 {
+			serverPort = 60050
+		}
+		return nrl.DeviceConfig{
+			SourceKey:  sourceKey,
+			Name:       dev.Name,
+			Callsign:   dev.Callsign,
+			DMRID:      dev.DMRID,
+			ServerAddr: strings.TrimSpace(dev.NRLServerAddr),
+			ServerPort: serverPort,
+			SSID:       dev.NRLSSID,
+			Slot:       slot,
+			TargetTG:   targetTG,
+			ColorCode:  dev.ColorCode,
+		}, true
+	}, func(sourceKey string, pkt proto.Packet) {
+		handleIngress("nrl", sourceKey, pkt, nil)
+	})
+	nrlBridge.SetCallsignResolver(func(dmrid uint32) string {
+		if resolver == nil || dmrid == 0 {
+			return ""
+		}
+		return resolver.Lookup(dmrid)
+	})
+	nrlBridge.SetInboundSourceResolver(func(dmrid uint32, originalCallsign string) uint32 {
+		if resolver == nil {
+			return dmrid
+		}
+		normalized := dmridpkg.NormalizeCallsign(originalCallsign)
+		if normalized != "" {
+			if dmrid != 0 {
+				resolved := dmridpkg.NormalizeCallsign(resolver.Lookup(dmrid))
+				if resolved != "" && resolved == normalized {
+					return dmrid
+				}
+			}
+			if matched := resolver.LookupID(normalized); matched != 0 {
+				return matched
+			}
+		}
+		if dmrid != 0 {
+			return dmrid
+		}
+		return 0
+	})
+	nrlBridge.SetStatusHandler(func(sourceKey, status string, online bool) {
+		dev, ok := registrySvc.FindDevice(sourceKey)
+		if !ok {
+			return
+		}
+		if dev.Status == status && dev.Online == online {
+			return
+		}
+		dev.Status = status
+		dev.Online = online
+		if online {
+			dev.LastSeenAt = time.Now().UTC()
+		}
+		if _, err := registrySvc.UpsertDevice(dev); err != nil {
+			slog.Warn("failed to persist NRL virtual link status", "sourceKey", sourceKey, "status", status, "error", err)
+		}
+	})
+	nrlBridge.SetEndpointHandler(func(sourceKey, ip string, port int) {
+		dev, ok := registrySvc.FindDevice(sourceKey)
+		if !ok {
+			return
+		}
+		if strings.TrimSpace(dev.IP) == strings.TrimSpace(ip) && dev.Port == port {
+			return
+		}
+		dev.IP = ip
+		dev.Port = port
+		if _, err := registrySvc.UpsertDevice(dev); err != nil {
+			slog.Warn("failed to persist NRL virtual link local endpoint", "sourceKey", sourceKey, "ip", ip, "port", port, "error", err)
+		}
+	})
+	if webServer != nil {
+		webServer.SetDeviceChangeHandler(func(eventType string, device registry.Device) {
+			if device.Protocol != "nrl-virtual" {
+				return
+			}
+			slog.Warn("web device change handler syncing NRL virtual link",
+				"type", eventType,
+				"sourceKey", device.SourceKey,
+				"disabled", device.Disabled,
+				"server", device.NRLServerAddr)
+			if eventType == "device_deleted" || device.Disabled || strings.TrimSpace(device.NRLServerAddr) == "" {
+				nrlBridge.Deactivate(device.SourceKey)
+				return
+			}
+			if err := nrlBridge.Activate(device.SourceKey); err != nil {
+				slog.Warn("web device change handler failed to activate NRL virtual link", "sourceKey", device.SourceKey, "error", err)
+			}
+		})
+	}
+	nrlTotal := 0
+	nrlEligible := 0
+	for _, dev := range registrySvc.Snapshot().Devices {
+		if dev.Protocol == "nrl-virtual" {
+			nrlTotal++
+		}
+		if dev.Protocol != "nrl-virtual" || dev.Disabled || strings.TrimSpace(dev.NRLServerAddr) == "" {
+			continue
+		}
+		nrlEligible++
+		slog.Warn("startup activating NRL virtual link",
+			"sourceKey", dev.SourceKey,
+			"callsign", dev.Callsign,
+			"server", dev.NRLServerAddr,
+			"port", dev.NRLServerPort,
+			"disabled", dev.Disabled)
+		if err := nrlBridge.Activate(dev.SourceKey); err != nil {
+			slog.Warn("failed to activate NRL virtual link", "sourceKey", dev.SourceKey, "error", err)
+		}
+	}
+	if nrlTotal > 0 {
+		slog.Warn("NRL startup scan completed", "totalDevices", nrlTotal, "eligibleDevices", nrlEligible)
+	}
+	if events, unsubscribe := registrySvc.Subscribe(); events != nil {
+		go func() {
+			defer unsubscribe()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event, ok := <-events:
+					if !ok {
+						return
+					}
+					if event.Device == nil {
+						slog.Warn("skipping non-device registry event for NRL bridge", "type", event.Type)
+						continue
+					}
+					dev := event.Device
+					if dev.Protocol != "nrl-virtual" {
+						continue
+					}
+					slog.Warn("received registry device event for NRL bridge",
+						"type", event.Type,
+						"sourceKey", dev.SourceKey,
+						"disabled", dev.Disabled,
+						"server", dev.NRLServerAddr)
+					if event.Type == "device_deleted" || dev.Disabled || strings.TrimSpace(dev.NRLServerAddr) == "" {
+						slog.Warn("device update deactivating NRL virtual link",
+							"sourceKey", dev.SourceKey,
+							"type", event.Type,
+							"disabled", dev.Disabled,
+							"server", dev.NRLServerAddr)
+						nrlBridge.Deactivate(dev.SourceKey)
+						continue
+					}
+					slog.Warn("device update activating NRL virtual link",
+						"sourceKey", dev.SourceKey,
+						"type", event.Type,
+						"callsign", dev.Callsign,
+						"server", dev.NRLServerAddr,
+						"port", dev.NRLServerPort)
+					if err := nrlBridge.Activate(dev.SourceKey); err != nil {
+						slog.Warn("failed to activate NRL virtual link after device update", "sourceKey", dev.SourceKey, "error", err)
+					}
+				}
+			}
+		}()
+	}
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					slog.Debug("NRL periodic scan tick")
+					for _, dev := range registrySvc.Snapshot().Devices {
+						if dev.Protocol != "nrl-virtual" {
+							continue
+						}
+						if dev.Disabled || strings.TrimSpace(dev.NRLServerAddr) == "" {
+							nrlBridge.Deactivate(dev.SourceKey)
+							continue
+						}
+						if nrlBridge.IsActive(dev.SourceKey) {
+							continue
+						}
+						if err := nrlBridge.Activate(dev.SourceKey); err != nil {
+							slog.Debug("NRL virtual link activate retry failed", "sourceKey", dev.SourceKey, "error", err)
+						}
+					}
+				}
+		}
+	}()
 	sendToTarget := func(targetKey, sourceFrontend, sourceDeviceKey string, pkt proto.Packet) bool {
 		if !forwardAllowed(targetKey) {
 			slog.Debug("skipped forwarding to disabled device", "target", targetKey, "frontend", sourceFrontend)
@@ -505,6 +751,11 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 				}
 			}
 			return false
+		case strings.HasPrefix(targetKey, "nrl-virtual:"):
+			if nrlBridge == nil {
+				return false
+			}
+			return nrlBridge.HandleDMRPacket(targetKey, pkt)
 		default:
 			return false
 		}
@@ -648,6 +899,9 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		case "hytera":
 			recordSourceKey = hyteraSourceKey(addr)
 			category = registry.CategoryHytera
+		case "nrl":
+			recordSourceKey = source
+			category = registry.CategoryNRL
 		}
 		sourceKey := frontend + ":" + source
 		if !ingressGuard.AllowIngress(sourceKey, pkt) {
@@ -782,8 +1036,13 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		})
 		err = hyteraServer.Start()
 		if err != nil {
-			return fmt.Errorf("failed to start Hytera server: %w", err)
+			slog.Error("failed to start Hytera server; disabling Hytera frontend", "p2pPort", cfg.Hytera.P2PPort, "dmrPort", cfg.Hytera.DMRPort, "rdacEnabled", cfg.Hytera.EnableRDAC, "rdacPort", cfg.Hytera.RDACPort, "error", err)
+			hyteraServer = nil
+		} else {
+			slog.Info("Hytera frontend listening", "p2pPort", cfg.Hytera.P2PPort, "dmrPort", cfg.Hytera.DMRPort, "rdacEnabled", cfg.Hytera.EnableRDAC, "rdacPort", cfg.Hytera.RDACPort)
 		}
+	} else {
+		slog.Warn("Hytera frontend disabled by configuration")
 	}
 
 	if cfg.IPSC.Enabled {
@@ -842,8 +1101,13 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		})
 		err = ipscServer.Start()
 		if err != nil {
-			return fmt.Errorf("failed to start IPSC server: %w", err)
+			slog.Error("failed to start IPSC server; disabling IPSC frontend", "port", cfg.IPSC.Port, "error", err)
+			ipscServer = nil
+		} else {
+			slog.Info("IPSC frontend listening", "port", cfg.IPSC.Port)
 		}
+	} else {
+		slog.Warn("IPSC frontend disabled by configuration")
 	}
 
 	for _, network := range mmdvmNetworks {
@@ -875,6 +1139,9 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		}
 		if hyteraServer != nil {
 			hyteraServer.Stop()
+		}
+		if nrlBridge != nil {
+			_ = nrlBridge.Close()
 		}
 		for _, network := range mmdvmNetworks {
 			network.Stop()
@@ -908,27 +1175,44 @@ func routeTargetPriority(sourceFrontend, deviceKey string) int {
 	switch sourceFrontend {
 	case "moto":
 		switch {
-		case strings.HasPrefix(deviceKey, "hytera:"):
+		case strings.HasPrefix(deviceKey, "nrl-virtual:"):
 			return 0
-		case strings.HasPrefix(deviceKey, "mmdvm:"):
+		case strings.HasPrefix(deviceKey, "hytera:"):
 			return 1
-		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
+		case strings.HasPrefix(deviceKey, "mmdvm:"):
 			return 2
-		case strings.HasPrefix(deviceKey, "moto:"):
+		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
 			return 3
+		case strings.HasPrefix(deviceKey, "moto:"):
+			return 4
 		}
 	case "hytera":
 		switch {
-		case strings.HasPrefix(deviceKey, "moto:"):
+		case strings.HasPrefix(deviceKey, "nrl-virtual:"):
 			return 0
-		case strings.HasPrefix(deviceKey, "mmdvm:"):
+		case strings.HasPrefix(deviceKey, "moto:"):
 			return 1
-		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
+		case strings.HasPrefix(deviceKey, "mmdvm:"):
 			return 2
-		case strings.HasPrefix(deviceKey, "hytera:"):
+		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
 			return 3
+		case strings.HasPrefix(deviceKey, "hytera:"):
+			return 4
 		}
 	case "mmdvm":
+		switch {
+		case strings.HasPrefix(deviceKey, "nrl-virtual:"):
+			return 0
+		case strings.HasPrefix(deviceKey, "moto:"):
+			return 1
+		case strings.HasPrefix(deviceKey, "hytera:"):
+			return 2
+		case strings.HasPrefix(deviceKey, "mmdvm:"):
+			return 3
+		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
+			return 4
+		}
+	case "nrl":
 		switch {
 		case strings.HasPrefix(deviceKey, "moto:"):
 			return 0
@@ -938,6 +1222,8 @@ func routeTargetPriority(sourceFrontend, deviceKey string) int {
 			return 2
 		case strings.HasPrefix(deviceKey, "mmdvm-upstream:"):
 			return 3
+		case strings.HasPrefix(deviceKey, "nrl-virtual:"):
+			return 4
 		}
 	}
 	return 10
@@ -951,6 +1237,86 @@ func packetForTargetSlot(pkt proto.Packet, targetSlot routing.Slot) (proto.Packe
 	return targetPkt, changed
 }
 
+func ensureManagedMMDVMClients(registrySvc *registry.Service, fallback []config.MMDVM) ([]config.MMDVM, error) {
+	snap := registrySvc.Snapshot()
+	var managed []config.MMDVM
+	skippedIncomplete := 0
+	skippedInvalid := 0
+	for _, dev := range snap.Devices {
+		if dev.Protocol != "mmdvm-upstream" || !strings.HasPrefix(dev.SourceKey, "mmdvm-upstream:") {
+			continue
+		}
+		if !mmdvm.HasManagedConfig(dev) {
+			skippedIncomplete++
+			continue
+		}
+		cfg, err := mmdvm.DeviceToConfig(dev)
+		if err != nil {
+			skippedInvalid++
+			slog.Warn("skipping invalid managed MMDVM client", "sourceKey", dev.SourceKey, "error", err)
+			continue
+		}
+		if err := config.ValidateMMDVMClients([]config.MMDVM{cfg}); err != nil {
+			skippedInvalid++
+			slog.Warn("skipping managed MMDVM client failing validation", "sourceKey", dev.SourceKey, "error", err)
+			continue
+		}
+		managed = append(managed, cfg)
+	}
+	if skippedIncomplete > 0 {
+		slog.Warn("skipping incomplete legacy MMDVM upstream records", "count", skippedIncomplete)
+	}
+	if skippedInvalid > 0 {
+		slog.Warn("skipping invalid managed MMDVM upstream records", "count", skippedInvalid)
+	}
+	if len(managed) == 0 && len(fallback) > 0 {
+		slog.Info("importing MMDVM client config into database", "count", len(fallback))
+		for i := range fallback {
+			cfg := fallback[i]
+			if strings.TrimSpace(cfg.SourceKey) == "" {
+				cfg.SourceKey = legacyMMDVMSourceKey(cfg.Name)
+			}
+			dev, err := mmdvm.ConfigToDevice(cfg)
+			if err != nil {
+				skippedInvalid++
+				slog.Warn("skipping invalid fallback MMDVM client", "sourceKey", cfg.SourceKey, "name", cfg.Name, "error", err)
+				continue
+			}
+			if _, err := registrySvc.UpsertDevice(dev); err != nil {
+				slog.Warn("failed to import fallback MMDVM client", "sourceKey", cfg.SourceKey, "name", cfg.Name, "error", err)
+				continue
+			}
+		}
+		snap = registrySvc.Snapshot()
+		for _, dev := range snap.Devices {
+			if dev.Protocol != "mmdvm-upstream" || !strings.HasPrefix(dev.SourceKey, "mmdvm-upstream:") {
+				continue
+			}
+			if !mmdvm.HasManagedConfig(dev) {
+				continue
+			}
+			cfg, err := mmdvm.DeviceToConfig(dev)
+			if err != nil {
+				slog.Warn("skipping invalid imported managed MMDVM client", "sourceKey", dev.SourceKey, "error", err)
+				continue
+			}
+			if err := config.ValidateMMDVMClients([]config.MMDVM{cfg}); err != nil {
+				slog.Warn("skipping imported managed MMDVM client failing validation", "sourceKey", dev.SourceKey, "error", err)
+				continue
+			}
+			managed = append(managed, cfg)
+		}
+	}
+	sort.Slice(managed, func(i, j int) bool {
+		return managed[i].Name < managed[j].Name
+	})
+	return managed, nil
+}
+
+func legacyMMDVMSourceKey(name string) string {
+	return "mmdvm-upstream:" + strings.TrimSpace(name)
+}
+
 func shouldActivateDynamicGroup(pkt proto.Packet) bool {
 	if !pkt.GroupCall || pkt.Dst == 0 {
 		return false
@@ -958,7 +1324,7 @@ func shouldActivateDynamicGroup(pkt proto.Packet) bool {
 	return pkt.FrameType == 2 && pkt.DTypeOrVSeq == 1
 }
 
-func loadDMRIDResolver(cfg *config.Config) (*dmrid.Resolver, error) {
+func loadDMRIDResolver(cfg *config.Config) (*dmridpkg.Resolver, error) {
 	candidates := make([]string, 0, 4)
 	if cfg.DMRIDDB.Path != "" {
 		candidates = append(candidates, cfg.DMRIDDB.Path)
@@ -967,7 +1333,7 @@ func loadDMRIDResolver(cfg *config.Config) (*dmrid.Resolver, error) {
 	}
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
-			resolver, err := dmrid.Load(candidate)
+			resolver, err := dmridpkg.Load(candidate)
 			if err != nil {
 				return nil, err
 			}

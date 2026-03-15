@@ -4,6 +4,11 @@ import (
 	"fmt"
 )
 
+const (
+	minPacketLen = 53
+	maxPacketLen = 55
+)
+
 type Packet struct {
 	Signature   string
 	Seq         uint
@@ -57,10 +62,10 @@ func (p Packet) Equal(other Packet) bool {
 
 func Decode(data []byte) (Packet, bool) {
 	var packet Packet
-	if len(data) < 53 {
+	if len(data) < minPacketLen {
 		return packet, false
 	}
-	if len(data) > 55 {
+	if len(data) > maxPacketLen {
 		return packet, false
 	}
 	packet.Signature = string(data[:4])
@@ -87,7 +92,7 @@ func (p *Packet) String() string {
 
 func (p *Packet) Encode() []byte {
 	// Encode the packet as we decoded
-	data := make([]byte, 53)
+	data := make([]byte, maxPacketLen)
 	copy(data[:4], []byte(p.Signature))
 	data[4] = byte(p.Seq)
 	data[5] = byte(p.Src >> 16) //nolint:golint,gomnd
@@ -115,5 +120,8 @@ func (p *Packet) Encode() []byte {
 	data[18] = byte(p.StreamID >> 8)  //nolint:golint,gomnd
 	data[19] = byte(p.StreamID)
 	copy(data[20:53], p.DMRData[:])
+	// Keep outbound DMRD as 55-byte packet and default metadata zeros.
+	data[53] = 0x00
+	data[54] = 0x00
 	return data
 }

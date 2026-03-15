@@ -470,9 +470,9 @@ func TestServiceRecordCallIgnoresStreamIDDriftForActiveCall(t *testing.T) {
 		Frontend:       "moto",
 		SourceCategory: CategoryMoto,
 		SourceKey:      "moto:4604111",
-		SourceDMRID:    4259892,
-		SrcID:          4259892,
-		DstID:          16896,
+		SourceDMRID:    4604111,
+		SrcID:          4604111,
+		DstID:          46025,
 		Slot:           1,
 		CallType:       "group",
 		StreamID:       4,
@@ -493,6 +493,60 @@ func TestServiceRecordCallIgnoresStreamIDDriftForActiveCall(t *testing.T) {
 	}
 	if snap.Calls[0].SrcID != 4604111 || snap.Calls[0].DstID != 46025 {
 		t.Fatalf("expected original src/dst to be preserved, got src=%d dst=%d", snap.Calls[0].SrcID, snap.Calls[0].DstID)
+	}
+}
+
+func TestServiceRecordCallCreatesNewWhenDestinationChanges(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "registry.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	svc, err := NewService(store, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	defer svc.Close()
+
+	_, inserted, err := svc.RecordCall(CallRecord{
+		Frontend:       "moto",
+		SourceCategory: CategoryMoto,
+		SourceKey:      "moto:4604111",
+		SourceDMRID:    4604111,
+		SrcID:          4604111,
+		DstID:          46025,
+		Slot:           1,
+		CallType:       "group",
+		StreamID:       1,
+	}, false)
+	if err != nil || !inserted {
+		t.Fatalf("record first call: inserted=%v err=%v", inserted, err)
+	}
+
+	_, inserted, err = svc.RecordCall(CallRecord{
+		Frontend:       "moto",
+		SourceCategory: CategoryMoto,
+		SourceKey:      "moto:4604111",
+		SourceDMRID:    4604111,
+		SrcID:          4604111,
+		DstID:          16896,
+		Slot:           1,
+		CallType:       "group",
+		StreamID:       4,
+	}, false)
+	if err != nil {
+		t.Fatalf("record second call with changed destination: %v", err)
+	}
+	if !inserted {
+		t.Fatal("expected a new call record when destination changes")
+	}
+
+	snap := svc.Snapshot()
+	if len(snap.Calls) != 2 {
+		t.Fatalf("expected 2 calls in snapshot, got %d: %#v", len(snap.Calls), snap.Calls)
 	}
 }
 

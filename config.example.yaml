@@ -40,6 +40,10 @@ local:
   callsign: "IPSC2MMDVM"
   color-code: 1
 
+# Optional bootstrap import only.
+# On first start, entries here are imported into SQLite if the database
+# does not already contain any managed MMDVM upstream devices.
+# After that, maintain MMDVM upstreams from the Web UI instead.
 mmdvm-client:
   - name: "BrandMeister"
     master-server: "3104.master.brandmeister.network:62031"

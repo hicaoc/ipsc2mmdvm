@@ -72,6 +72,11 @@ func (s *Store) migrate() error {
 			slots INTEGER NOT NULL DEFAULT 0,
 			notes TEXT NOT NULL DEFAULT '',
 			device_password TEXT NOT NULL DEFAULT '',
+			nrl_server_addr TEXT NOT NULL DEFAULT '',
+			nrl_server_port INTEGER NOT NULL DEFAULT 0,
+			nrl_ssid INTEGER NOT NULL DEFAULT 0,
+			nrl_udp_port INTEGER NOT NULL DEFAULT 0,
+			nrl_slot INTEGER NOT NULL DEFAULT 0,
 			disabled INTEGER NOT NULL DEFAULT 0,
 			extra_json TEXT NOT NULL DEFAULT ''
 		)`,
@@ -149,6 +154,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.ensureDeviceColumn("nrl_udp_port", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureDeviceColumn("nrl_slot", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_devices_owner_user_id ON devices(owner_user_id)`); err != nil {
@@ -278,7 +286,7 @@ func (s *Store) LoadDevices() ([]Device, error) {
 		SELECT id, category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port,
 		       status, online, first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power,
 		       color_code, latitude, longitude, height, location, description, url, slots, notes,
-		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, disabled, extra_json
+		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
 		FROM devices ORDER BY last_seen_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
@@ -409,8 +417,8 @@ func (s *Store) UpsertDevice(dev Device) (Device, error) {
 			category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port, status, online,
 			first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power, color_code, latitude,
 			longitude, height, location, description, url, slots, notes, device_password, nrl_server_addr, nrl_server_port,
-			nrl_ssid, nrl_udp_port, disabled, extra_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_key) DO UPDATE SET
 			category=excluded.category,
 			protocol=excluded.protocol,
@@ -443,13 +451,14 @@ func (s *Store) UpsertDevice(dev Device) (Device, error) {
 			nrl_server_port=CASE WHEN excluded.nrl_server_port = 0 THEN devices.nrl_server_port ELSE excluded.nrl_server_port END,
 			nrl_ssid=CASE WHEN excluded.nrl_ssid = 0 THEN devices.nrl_ssid ELSE excluded.nrl_ssid END,
 			nrl_udp_port=CASE WHEN excluded.nrl_udp_port = 0 THEN devices.nrl_udp_port ELSE excluded.nrl_udp_port END,
+			nrl_slot=CASE WHEN excluded.nrl_slot = 0 THEN devices.nrl_slot ELSE excluded.nrl_slot END,
 			disabled=excluded.disabled,
 			extra_json=CASE WHEN excluded.extra_json = '' THEN devices.extra_json ELSE excluded.extra_json END`,
 		string(dev.Category), dev.Protocol, dev.SourceKey, dev.OwnerUserID, dev.Name, dev.Callsign, dev.DMRID, dev.Model, dev.Serial,
 		dev.IP, dev.Port, dev.Status, boolToInt(dev.Online), formatTime(dev.FirstSeenAt), formatTime(dev.LastSeenAt),
 		formatOptionalTime(dev.LastCallAt), dev.RXFreq, dev.TXFreq, dev.TXPower, dev.ColorCode, dev.Latitude,
 		dev.Longitude, dev.Height, dev.Location, dev.Description, dev.URL, dev.Slots, dev.Notes, dev.DevicePassword,
-		dev.NRLServerAddr, dev.NRLServerPort, dev.NRLSSID, dev.NRLUDPPort, boolToInt(dev.Disabled), dev.ExtraJSON)
+		dev.NRLServerAddr, dev.NRLServerPort, dev.NRLSSID, dev.NRLUDPPort, dev.NRLSlot, boolToInt(dev.Disabled), dev.ExtraJSON)
 	if err != nil {
 		return Device{}, err
 	}
@@ -474,6 +483,7 @@ type DevicePatch struct {
 	NRLServerPort  *int
 	NRLSSID        *uint8
 	NRLUDPPort     *int
+	NRLSlot        *int
 }
 
 func (s *Store) UpdateDeviceMetadata(id int64, patch DevicePatch) (Device, error) {
@@ -523,7 +533,49 @@ func (s *Store) UpdateDeviceMetadata(id int64, patch DevicePatch) (Device, error
 	if patch.NRLUDPPort != nil {
 		current.NRLUDPPort = *patch.NRLUDPPort
 	}
-	return s.UpsertDevice(current)
+	if patch.NRLSlot != nil {
+		current.NRLSlot = *patch.NRLSlot
+	}
+
+	_, err = s.db.Exec(`
+		UPDATE devices SET
+			owner_user_id=?,
+			name=?,
+			callsign=?,
+			dmrid=?,
+			model=?,
+			description=?,
+			location=?,
+			notes=?,
+			device_password=?,
+			nrl_server_addr=?,
+			nrl_server_port=?,
+			nrl_ssid=?,
+			nrl_udp_port=?,
+			nrl_slot=?,
+			disabled=?
+		WHERE id=?`,
+		current.OwnerUserID,
+		current.Name,
+		current.Callsign,
+		current.DMRID,
+		current.Model,
+		current.Description,
+		current.Location,
+		current.Notes,
+		current.DevicePassword,
+		current.NRLServerAddr,
+		current.NRLServerPort,
+		current.NRLSSID,
+		current.NRLUDPPort,
+		current.NRLSlot,
+		boolToInt(current.Disabled),
+		id,
+	)
+	if err != nil {
+		return Device{}, err
+	}
+	return s.DeviceByID(id)
 }
 
 func (s *Store) DeleteDevice(id int64) (Device, error) {
@@ -549,7 +601,7 @@ func (s *Store) mergeDuplicateDMRID(tx *sql.Tx, dev Device) (Device, error) {
 		SELECT id, category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port,
 		       status, online, first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power,
 		       color_code, latitude, longitude, height, location, description, url, slots, notes,
-		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, disabled, extra_json
+		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
 		FROM devices WHERE dmrid=? AND source_key<>? AND protocol <> 'mmdvm-upstream'
 		ORDER BY last_seen_at DESC, id DESC`, dev.DMRID, dev.SourceKey)
 	if err != nil {
@@ -604,6 +656,12 @@ func mergePreferredDevice(incoming, existing Device) Device {
 	if incoming.Serial == "" {
 		incoming.Serial = existing.Serial
 	}
+	if incoming.IP == "" {
+		incoming.IP = existing.IP
+	}
+	if incoming.Port == 0 {
+		incoming.Port = existing.Port
+	}
 	if incoming.Location == "" {
 		incoming.Location = existing.Location
 	}
@@ -627,6 +685,9 @@ func mergePreferredDevice(incoming, existing Device) Device {
 	}
 	if incoming.NRLUDPPort == 0 {
 		incoming.NRLUDPPort = existing.NRLUDPPort
+	}
+	if incoming.NRLSlot == 0 {
+		incoming.NRLSlot = existing.NRLSlot
 	}
 	if !incoming.Disabled {
 		incoming.Disabled = existing.Disabled
@@ -694,7 +755,7 @@ func (s *Store) DeviceByID(id int64) (Device, error) {
 		SELECT id, category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port,
 		       status, online, first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power,
 		       color_code, latitude, longitude, height, location, description, url, slots, notes,
-		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, disabled, extra_json
+		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
 		FROM devices WHERE id=?`, id)
 	return scanDevice(row.Scan)
 }
@@ -704,7 +765,7 @@ func (s *Store) DeviceBySourceKey(sourceKey string) (Device, error) {
 		SELECT id, category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port,
 		       status, online, first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power,
 		       color_code, latitude, longitude, height, location, description, url, slots, notes,
-		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, disabled, extra_json
+		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
 		FROM devices WHERE source_key=?`, sourceKey)
 	return scanDevice(row.Scan)
 }
@@ -714,7 +775,7 @@ func (s *Store) ListDevicesByOwner(ownerUserID int64) ([]Device, error) {
 		SELECT id, category, protocol, source_key, owner_user_id, name, callsign, dmrid, model, serial, ip, port,
 		       status, online, first_seen_at, last_seen_at, last_call_at, rx_freq, tx_freq, tx_power,
 		       color_code, latitude, longitude, height, location, description, url, slots, notes,
-		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, disabled, extra_json
+		       device_password, nrl_server_addr, nrl_server_port, nrl_ssid, nrl_udp_port, nrl_slot, disabled, extra_json
 		FROM devices WHERE owner_user_id=? ORDER BY id DESC`, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -863,7 +924,7 @@ func scanDevice(scan func(dest ...any) error) (Device, error) {
 		&dev.Serial, &dev.IP, &dev.Port, &dev.Status, &online, &firstSeenRaw, &lastSeenRaw, &lastCallRaw,
 		&dev.RXFreq, &dev.TXFreq, &dev.TXPower, &dev.ColorCode, &dev.Latitude, &dev.Longitude, &dev.Height,
 		&dev.Location, &dev.Description, &dev.URL, &dev.Slots, &dev.Notes, &dev.DevicePassword,
-		&dev.NRLServerAddr, &dev.NRLServerPort, &dev.NRLSSID, &dev.NRLUDPPort, &disabled, &dev.ExtraJSON,
+		&dev.NRLServerAddr, &dev.NRLServerPort, &dev.NRLSSID, &dev.NRLUDPPort, &dev.NRLSlot, &disabled, &dev.ExtraJSON,
 	)
 	if err != nil {
 		return Device{}, err

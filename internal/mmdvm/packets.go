@@ -83,8 +83,10 @@ func (h *MMDVMClient) sendPing() {
 }
 
 func (h *MMDVMClient) sendPacket(packet proto.Packet) {
-	data := make([]byte, 53)
-	copy(data, packet.Encode())
+	// Align with HBLink behavior: outbound DMRD peer/repeater field must be
+	// this client identity (logged-in RadioID), not transit source value.
+	packet.Repeater = uint(h.cfg.ID)
+	data := packet.Encode()
 	st := state(h.state.Load() & 0xFF)
 	slog.Debug("MMDVM outbound packet queued",
 		"network", h.cfg.Name,

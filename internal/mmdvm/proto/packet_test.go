@@ -30,8 +30,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	original := samplePacket()
 	encoded := original.Encode()
 
-	if len(encoded) != 53 {
-		t.Fatalf("expected 53 bytes, got %d", len(encoded))
+	if len(encoded) != 55 {
+		t.Fatalf("expected 55 bytes, got %d", len(encoded))
 	}
 
 	decoded, ok := Decode(encoded)
@@ -356,7 +356,16 @@ func TestEncodeLen(t *testing.T) {
 	t.Parallel()
 	p := samplePacket()
 	data := p.Encode()
-	if len(data) != 53 {
-		t.Fatalf("expected encoded length 53, got %d", len(data))
+	if len(data) != 55 {
+		t.Fatalf("expected encoded length 55, got %d", len(data))
+	}
+}
+
+func TestEncodeTrailingMetadata(t *testing.T) {
+	t.Parallel()
+	p := samplePacket()
+	data := p.Encode()
+	if data[53] != 0x00 || data[54] != 0x00 {
+		t.Fatalf("expected trailing metadata 00 00, got %02X %02X", data[53], data[54])
 	}
 }

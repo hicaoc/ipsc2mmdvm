@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hicaoc/ipsc2mmdvm/internal/audio"
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
+	"github.com/hicaoc/ipsc2mmdvm/internal/mmdvm"
 	"github.com/hicaoc/ipsc2mmdvm/internal/registry"
 	"github.com/hicaoc/ipsc2mmdvm/internal/routing"
 )
@@ -28,12 +29,13 @@ var staticFS embed.FS
 const sessionCookieName = "ipsc2mmdvm_session"
 
 type Server struct {
-	registry *registry.Service
-	router   *routing.SubscriptionManager
-	audio    *audio.Hub
-	runtime  RuntimeInfo
-	upgrader websocket.Upgrader
-	mux      *http.ServeMux
+	registry            *registry.Service
+	router              *routing.SubscriptionManager
+	audio               *audio.Hub
+	runtime             RuntimeInfo
+	deviceChangeHandler func(eventType string, device registry.Device)
+	upgrader            websocket.Upgrader
+	mux                 *http.ServeMux
 
 	sessionMu sync.RWMutex
 	sessions  map[string]sessionState
@@ -77,6 +79,77 @@ type snapshotPayload struct {
 type wsControlMessage struct {
 	Type   string `json:"type"`
 	Target string `json:"target"`
+}
+
+type deviceUpdatePayload struct {
+	Protocol       *string                     `json:"protocol"`
+	OwnerUserID    *int64                      `json:"ownerUserId"`
+	Name           *string                     `json:"name"`
+	Callsign       *string                     `json:"callsign"`
+	Notes          *string                     `json:"notes"`
+	Disabled       *bool                       `json:"disabled"`
+	DMRID          *uint32                     `json:"dmrid"`
+	Model          *string                     `json:"model"`
+	Description    *string                     `json:"description"`
+	Location       *string                     `json:"location"`
+	DevicePassword *string                     `json:"devicePassword"`
+	NRLServerAddr  *string                     `json:"nrlServerAddr"`
+	NRLServerPort  *int                        `json:"nrlServerPort"`
+	NRLSSID        *uint8                      `json:"nrlSsid"`
+	NRLUDPPort     *int                        `json:"nrlUdpPort"`
+	NRLSlot        *int                        `json:"nrlSlot"`
+	RXFreq         *uint                       `json:"rxFreq"`
+	TXFreq         *uint                       `json:"txFreq"`
+	TXPower        *uint8                      `json:"txPower"`
+	ColorCode      *uint8                      `json:"colorCode"`
+	Latitude       *float64                    `json:"latitude"`
+	Longitude      *float64                    `json:"longitude"`
+	Height         *uint16                     `json:"height"`
+	URL            *string                     `json:"url"`
+	Slots          *byte                       `json:"slots"`
+	MasterServer   *string                     `json:"mmdvmMasterServer"`
+	TGRewrites     *[]config.TGRewriteConfig   `json:"tgRewrites"`
+	PCRewrites     *[]config.PCRewriteConfig   `json:"pcRewrites"`
+	TypeRewrites   *[]config.TypeRewriteConfig `json:"typeRewrites"`
+	SrcRewrites    *[]config.SrcRewriteConfig  `json:"srcRewrites"`
+	PassAllPC      *[]int                      `json:"passAllPC"`
+	PassAllTG      *[]int                      `json:"passAllTG"`
+	StaticSlot1    *[]uint32                   `json:"staticSlot1"`
+	StaticSlot2    *[]uint32                   `json:"staticSlot2"`
+}
+
+type deviceCreatePayload struct {
+	Protocol       string                     `json:"protocol"`
+	Name           string                     `json:"name"`
+	Callsign       string                     `json:"callsign"`
+	DMRID          uint32                     `json:"dmrid"`
+	Model          string                     `json:"model"`
+	Description    string                     `json:"description"`
+	Location       string                     `json:"location"`
+	Notes          string                     `json:"notes"`
+	NRLServerAddr  string                     `json:"nrlServerAddr"`
+	NRLServerPort  int                        `json:"nrlServerPort"`
+	NRLSSID        uint8                      `json:"nrlSsid"`
+	NRLUDPPort     int                        `json:"nrlUdpPort"`
+	NRLSlot        int                        `json:"nrlSlot"`
+	DevicePassword string                     `json:"devicePassword"`
+	RXFreq         uint                       `json:"rxFreq"`
+	TXFreq         uint                       `json:"txFreq"`
+	TXPower        uint8                      `json:"txPower"`
+	ColorCode      uint8                      `json:"colorCode"`
+	Latitude       float64                    `json:"latitude"`
+	Longitude      float64                    `json:"longitude"`
+	Height         uint16                     `json:"height"`
+	URL            string                     `json:"url"`
+	Slots          byte                       `json:"slots"`
+	MasterServer   string                     `json:"mmdvmMasterServer"`
+	TGRewrites     []config.TGRewriteConfig   `json:"tgRewrites"`
+	PCRewrites     []config.PCRewriteConfig   `json:"pcRewrites"`
+	TypeRewrites   []config.TypeRewriteConfig `json:"typeRewrites"`
+	SrcRewrites    []config.SrcRewriteConfig  `json:"srcRewrites"`
+	PassAllPC      []int                      `json:"passAllPC"`
+	PassAllTG      []int                      `json:"passAllTG"`
+	StaticGroups   []uint32                   `json:"staticGroups"`
 }
 
 func NewServer(reg *registry.Service, router *routing.SubscriptionManager, audioHub *audio.Hub, cfg *config.Config) *Server {
@@ -131,12 +204,20 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+func (s *Server) SetDeviceChangeHandler(handler func(eventType string, device registry.Device)) {
+	if s == nil {
+		return
+	}
+	s.deviceChangeHandler = handler
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/auth/register", s.handleRegister)
 	s.mux.HandleFunc("/api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("/api/auth/logout", s.withAuth(s.handleLogout))
 	s.mux.HandleFunc("/api/auth/me", s.withAuth(s.handleMe))
 	s.mux.HandleFunc("/api/snapshot", s.handleSnapshotPublic)
+	s.mux.HandleFunc("/api/devices", s.withAdmin(s.handleDeviceCreate))
 	s.mux.HandleFunc("/api/devices/", s.withAuth(s.handleDeviceUpdate))
 	s.mux.HandleFunc("/api/users", s.withAdmin(s.handleUsers))
 	s.mux.HandleFunc("/api/users/", s.withAdmin(s.handleUserByID))
@@ -342,30 +423,65 @@ func (s *Server) handleDeviceUpdate(w http.ResponseWriter, r *http.Request, user
 		if s.router != nil {
 			s.router.RemoveDevice(device.SourceKey)
 		}
+		if s.deviceChangeHandler != nil {
+			s.deviceChangeHandler("device_deleted", device)
+		}
 		writeJSON(w, http.StatusOK, device)
 		return
 	}
-	var payload struct {
-		OwnerUserID    *int64    `json:"ownerUserId"`
-		Name           *string   `json:"name"`
-		Callsign       *string   `json:"callsign"`
-		Notes          *string   `json:"notes"`
-		Disabled       *bool     `json:"disabled"`
-		DMRID          *uint32   `json:"dmrid"`
-		Model          *string   `json:"model"`
-		Description    *string   `json:"description"`
-		Location       *string   `json:"location"`
-		DevicePassword *string   `json:"devicePassword"`
-		NRLServerAddr  *string   `json:"nrlServerAddr"`
-		NRLServerPort  *int      `json:"nrlServerPort"`
-		NRLSSID        *uint8    `json:"nrlSsid"`
-		NRLUDPPort     *int      `json:"nrlUdpPort"`
-		StaticSlot1    *[]uint32 `json:"staticSlot1"`
-		StaticSlot2    *[]uint32 `json:"staticSlot2"`
-	}
+	var payload deviceUpdatePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
+	}
+	if device.Protocol == "nrl-virtual" && payload.Disabled != nil {
+		slog.Warn("received NRL virtual link disable toggle",
+			"sourceKey", device.SourceKey,
+			"currentDisabled", device.Disabled,
+			"nextDisabled", *payload.Disabled,
+			"user", user.Username)
+	}
+	if device.Protocol == "mmdvm-upstream" {
+		cfg, err := buildManagedMMDVMConfig(device, payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.ValidateMMDVMClients([]config.MMDVM{cfg}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		updatedDevice, err := mmdvm.ConfigToDevice(cfg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		updatedDevice.ID = device.ID
+		updatedDevice.OwnerUserID = device.OwnerUserID
+		updatedDevice.Status = device.Status
+		updatedDevice.Online = device.Online
+		updatedDevice.FirstSeenAt = device.FirstSeenAt
+		updatedDevice.LastSeenAt = device.LastSeenAt
+		updatedDevice.LastCallAt = device.LastCallAt
+		updatedDevice.Disabled = device.Disabled
+		if user.Role == registry.RoleAdmin {
+			if payload.OwnerUserID != nil {
+				updatedDevice.OwnerUserID = *payload.OwnerUserID
+			}
+		}
+		if payload.Disabled != nil {
+			updatedDevice.Disabled = *payload.Disabled
+		}
+		stored, err := s.registry.UpsertDevice(updatedDevice)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, stored)
+		return
+	}
+	if device.Protocol == "nrl-virtual" && payload.Callsign != nil && strings.TrimSpace(*payload.Callsign) == "" {
+		payload.Callsign = nil
 	}
 	patch := registry.DevicePatch{
 		Name:           payload.Name,
@@ -378,15 +494,18 @@ func (s *Server) handleDeviceUpdate(w http.ResponseWriter, r *http.Request, user
 		NRLServerPort:  payload.NRLServerPort,
 		NRLSSID:        payload.NRLSSID,
 		NRLUDPPort:     payload.NRLUDPPort,
+		NRLSlot:        payload.NRLSlot,
 	}
 	if user.Role == registry.RoleAdmin {
 		patch.OwnerUserID = payload.OwnerUserID
 		patch.Callsign = normalizeStringPtr(payload.Callsign, true)
 		patch.Disabled = payload.Disabled
 		patch.DMRID = payload.DMRID
-	} else if payload.Callsign != nil || payload.OwnerUserID != nil || payload.Disabled != nil || payload.DMRID != nil {
+	} else if payload.Callsign != nil || payload.OwnerUserID != nil || payload.DMRID != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	} else {
+		patch.Disabled = payload.Disabled
 	}
 	updated, err := s.registry.UpdateDeviceMetadata(id, patch)
 	if err != nil {
@@ -397,6 +516,39 @@ func (s *Server) handleDeviceUpdate(w http.ResponseWriter, r *http.Request, user
 		deviceByID, err := s.registry.DeviceByID(id)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if deviceByID.Protocol == "nrl-virtual" {
+			slot := deviceByID.NRLSlot
+			if slot != 2 {
+				slot = 1
+			}
+			var groups []uint32
+			if slot == 1 && payload.StaticSlot1 != nil {
+				groups = *payload.StaticSlot1
+			}
+			if slot == 2 && payload.StaticSlot2 != nil {
+				groups = *payload.StaticSlot2
+			}
+			if len(groups) > 1 {
+				groups = groups[:1]
+			}
+			if err := s.registry.ReplaceStaticGroups(deviceByID.SourceKey, slot, groups); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := s.registry.ReplaceStaticGroups(deviceByID.SourceKey, 3-slot, nil); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if s.router != nil {
+				s.router.ReplaceStatic(deviceByID.SourceKey, routing.Slot(slot), groups)
+				s.router.ReplaceStatic(deviceByID.SourceKey, routing.Slot(3-slot), nil)
+			}
+			if s.deviceChangeHandler != nil {
+				s.deviceChangeHandler("device_updated", updated)
+			}
+			writeJSON(w, http.StatusOK, updated)
 			return
 		}
 		if payload.StaticSlot1 != nil {
@@ -418,7 +570,213 @@ func (s *Server) handleDeviceUpdate(w http.ResponseWriter, r *http.Request, user
 			}
 		}
 	}
+	if s.deviceChangeHandler != nil {
+		s.deviceChangeHandler("device_updated", updated)
+	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleDeviceCreate(w http.ResponseWriter, r *http.Request, user registry.User) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload deviceCreatePayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(payload.Protocol), "mmdvm-upstream") {
+		token, err := randomToken(6)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cfg := config.MMDVM{
+			SourceKey:    "mmdvm-upstream:" + token,
+			Name:         strings.TrimSpace(payload.Name),
+			Callsign:     strings.TrimSpace(payload.Callsign),
+			ID:           payload.DMRID,
+			RXFreq:       payload.RXFreq,
+			TXFreq:       payload.TXFreq,
+			TXPower:      payload.TXPower,
+			ColorCode:    payload.ColorCode,
+			Latitude:     payload.Latitude,
+			Longitude:    payload.Longitude,
+			Height:       payload.Height,
+			Location:     strings.TrimSpace(payload.Location),
+			Description:  strings.TrimSpace(payload.Description),
+			URL:          strings.TrimSpace(payload.URL),
+			Slots:        payload.Slots,
+			MasterServer: strings.TrimSpace(payload.MasterServer),
+			Password:     payload.DevicePassword,
+			TGRewrites:   payload.TGRewrites,
+			PCRewrites:   payload.PCRewrites,
+			TypeRewrites: payload.TypeRewrites,
+			SrcRewrites:  payload.SrcRewrites,
+			PassAllPC:    payload.PassAllPC,
+			PassAllTG:    payload.PassAllTG,
+		}
+		if cfg.Slots == 0 {
+			cfg.Slots = 3
+		}
+		if err := config.ValidateMMDVMClients([]config.MMDVM{cfg}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		dev, err := mmdvm.ConfigToDevice(cfg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		stored, err := s.registry.UpsertDevice(dev)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, stored)
+		return
+	}
+	slot := payload.NRLSlot
+	if slot != 2 {
+		slot = 1
+	}
+	callsign := strings.ToUpper(strings.TrimSpace(payload.Callsign))
+	if callsign == "" {
+		callsign = strings.ToUpper(strings.TrimSpace(user.Callsign))
+	}
+	if callsign == "" {
+		http.Error(w, "callsign is required", http.StatusBadRequest)
+		return
+	}
+	if len(payload.StaticGroups) > 1 {
+		payload.StaticGroups = payload.StaticGroups[:1]
+	}
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = "NRL Virtual Link"
+	}
+	token, err := randomToken(6)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	dev, err := s.registry.UpsertDevice(registry.Device{
+		Category:      registry.CategoryNRL,
+		Protocol:      "nrl-virtual",
+		SourceKey:     "nrl-virtual:" + token,
+		Name:          name,
+		Callsign:      callsign,
+		DMRID:         payload.DMRID,
+		Model:         strings.TrimSpace(payload.Model),
+		Description:   strings.TrimSpace(payload.Description),
+		Location:      strings.TrimSpace(payload.Location),
+		Notes:         payload.Notes,
+		NRLServerAddr: strings.TrimSpace(payload.NRLServerAddr),
+		NRLServerPort: payload.NRLServerPort,
+		NRLSSID:       payload.NRLSSID,
+		NRLUDPPort:    payload.NRLUDPPort,
+		NRLSlot:       slot,
+		Slots:         1,
+		Status:        "configured",
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.registry.ReplaceStaticGroups(dev.SourceKey, slot, payload.StaticGroups); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.router != nil {
+		s.router.ReplaceStatic(dev.SourceKey, routing.Slot(slot), payload.StaticGroups)
+		if slot == 1 {
+			s.router.ReplaceStatic(dev.SourceKey, routing.Slot2, nil)
+		} else {
+			s.router.ReplaceStatic(dev.SourceKey, routing.Slot1, nil)
+		}
+	}
+	if s.deviceChangeHandler != nil {
+		s.deviceChangeHandler("device_created", dev)
+	}
+	writeJSON(w, http.StatusCreated, dev)
+}
+
+func buildManagedMMDVMConfig(current registry.Device, payload deviceUpdatePayload) (config.MMDVM, error) {
+	cfg, err := mmdvm.DeviceToConfig(current)
+	if err != nil {
+		return config.MMDVM{}, err
+	}
+	if payload.Name != nil {
+		cfg.Name = strings.TrimSpace(*payload.Name)
+	}
+	if payload.Callsign != nil {
+		cfg.Callsign = strings.TrimSpace(*payload.Callsign)
+	}
+	if payload.DMRID != nil {
+		cfg.ID = *payload.DMRID
+	}
+	if payload.Description != nil {
+		cfg.Description = strings.TrimSpace(*payload.Description)
+	}
+	if payload.Location != nil {
+		cfg.Location = strings.TrimSpace(*payload.Location)
+	}
+	if payload.DevicePassword != nil {
+		cfg.Password = *payload.DevicePassword
+	}
+	if payload.RXFreq != nil {
+		cfg.RXFreq = *payload.RXFreq
+	}
+	if payload.TXFreq != nil {
+		cfg.TXFreq = *payload.TXFreq
+	}
+	if payload.TXPower != nil {
+		cfg.TXPower = *payload.TXPower
+	}
+	if payload.ColorCode != nil {
+		cfg.ColorCode = *payload.ColorCode
+	}
+	if payload.Latitude != nil {
+		cfg.Latitude = *payload.Latitude
+	}
+	if payload.Longitude != nil {
+		cfg.Longitude = *payload.Longitude
+	}
+	if payload.Height != nil {
+		cfg.Height = *payload.Height
+	}
+	if payload.URL != nil {
+		cfg.URL = strings.TrimSpace(*payload.URL)
+	}
+	if payload.Slots != nil {
+		cfg.Slots = *payload.Slots
+	}
+	if payload.MasterServer != nil {
+		cfg.MasterServer = strings.TrimSpace(*payload.MasterServer)
+	}
+	if payload.TGRewrites != nil {
+		cfg.TGRewrites = append([]config.TGRewriteConfig(nil), (*payload.TGRewrites)...)
+	}
+	if payload.PCRewrites != nil {
+		cfg.PCRewrites = append([]config.PCRewriteConfig(nil), (*payload.PCRewrites)...)
+	}
+	if payload.TypeRewrites != nil {
+		cfg.TypeRewrites = append([]config.TypeRewriteConfig(nil), (*payload.TypeRewrites)...)
+	}
+	if payload.SrcRewrites != nil {
+		cfg.SrcRewrites = append([]config.SrcRewriteConfig(nil), (*payload.SrcRewrites)...)
+	}
+	if payload.PassAllPC != nil {
+		cfg.PassAllPC = append([]int(nil), (*payload.PassAllPC)...)
+	}
+	if payload.PassAllTG != nil {
+		cfg.PassAllTG = append([]int(nil), (*payload.PassAllTG)...)
+	}
+	if cfg.Slots == 0 {
+		cfg.Slots = 3
+	}
+	return cfg, nil
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request, _ registry.User) {

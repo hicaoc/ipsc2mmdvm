@@ -14,6 +14,7 @@ const authOpen = ref(false)
 const deviceEditorOpen = ref(false)
 const accountCreatorOpen = ref(false)
 const editingDeviceId = ref(null)
+const pendingDevice = ref(null)
 const authForm = ref({ username: '', callsign: '', email: '', password: '' })
 const authConfirmPassword = ref('')
 const authShowPassword = ref(false)
@@ -53,7 +54,9 @@ const myDevices = computed(() => {
 const filteredDevices = computed(() => filterDevices(sortedDevices.value, deviceSearch.value))
 const filteredMyDevices = computed(() => filterDevices(myDevices.value, deviceSearch.value))
 const editingDevice = computed(() =>
-  sortedDevices.value.find((device) => device.id === editingDeviceId.value) || null
+  pendingDevice.value?.id === editingDeviceId.value
+    ? pendingDevice.value
+    : sortedDevices.value.find((device) => device.id === editingDeviceId.value) || null
 )
 const sortedCalls = computed(() =>
   [...snapshot.value.calls].sort((a, b) => {
@@ -280,6 +283,11 @@ function callStatusLabel(call) {
   return isActiveCall(call) ? t('call.live') : callTypeLabel(call)
 }
 
+function deviceStatusLabel(device) {
+  if (device?.disabled) return t('app.disable')
+  return device?.online ? t('call.online') : t('call.offline')
+}
+
 function roleLabel(role) {
   return role === 'admin' ? t('auth.roleAdminLabel') : t('auth.roleHamLabel')
 }
@@ -295,6 +303,17 @@ function groupSummary(sourceKey, slot, kind = 'static') {
   return values.length ? values.join(', ') : '-'
 }
 
+function deviceStaticGroupRows(device) {
+  if (isNRLVirtualDevice(device)) {
+    const slot = Number(device?.nrlSlot || 1) === 2 ? 2 : 1
+    return [{ slot, value: groupSummary(device.sourceKey, slot, 'static') }]
+  }
+  return [
+    { slot: 1, value: groupSummary(device.sourceKey, 1, 'static') },
+    { slot: 2, value: groupSummary(device.sourceKey, 2, 'static') }
+  ]
+}
+
 function canEditDevice(device) {
   if (!user.value) return false
   if (isAdmin.value) return true
@@ -305,6 +324,23 @@ function isHyteraDevice(device) {
   const protocol = String(device?.protocol || '').toLowerCase()
   const sourceKey = String(device?.sourceKey || '').toLowerCase()
   return protocol === 'hytera' || sourceKey.startsWith('hytera:')
+}
+
+function isNRLVirtualDevice(device) {
+  return String(device?.protocol || '').toLowerCase() === 'nrl-virtual'
+}
+
+function isManagedMMDVMDevice(device) {
+  return String(device?.protocol || '').toLowerCase() === 'mmdvm-upstream'
+}
+
+function deviceToneClass(device) {
+  if (isNRLVirtualDevice(device)) return 'device-tone-nrl'
+  if (isManagedMMDVMDevice(device)) return 'device-tone-mmdvm'
+  if (isHyteraDevice(device)) return 'device-tone-hytera'
+  if (String(device?.protocol || '').toLowerCase() === 'ipsc') return 'device-tone-ipsc'
+  if (String(device?.category || '').toLowerCase() === 'moto') return 'device-tone-ipsc'
+  return 'device-tone-default'
 }
 
 function deviceExtra(device) {
@@ -332,12 +368,57 @@ function deviceSecondaryInfo(device) {
     items.push(`${t('device.nrlServerAddr')} ${device?.nrlServerAddr || '-'}`)
     items.push(`${t('device.nrlServerPort')} ${device?.nrlServerPort || '-'}`)
     items.push(`${t('device.nrlSsid')} ${device?.nrlSsid || '-'}`)
-    items.push(`${t('device.nrlUdpPort')} ${device?.nrlUdpPort || '-'}`)
+  }
+  if (isNRLVirtualDevice(device)) {
+    items.push(`${t('device.localEndpoint')} ${device?.ip || '-'}${device?.port ? `:${device.port}` : ''}`)
+    items.push(`${t('device.nrlServerAddr')} ${device?.nrlServerAddr || '-'}`)
+    items.push(`${t('device.nrlServerPort')} ${device?.nrlServerPort || '-'}`)
+    items.push(`${t('device.nrlSsid')} ${device?.nrlSsid || '-'}`)
+    items.push(`${t('device.nrlSlot')} ${device?.nrlSlot || 1}`)
+  }
+  if (isManagedMMDVMDevice(device)) {
+    const extra = deviceExtra(device)
+    const master = extra?.masterServer || deviceAddress(device)
+    items.push(`${t('device.masterServer')} ${master || '-'}`)
+    items.push(`${t('device.slotsLabel')} ${formatSlotMask(device?.slots || 3)}`)
   }
   return items
 }
 
+function formatSlotMask(mask) {
+  const value = Number(mask || 0)
+  const items = []
+  if (value & 1) items.push('TS1')
+  if (value & 2) items.push('TS2')
+  return items.length ? items.join(' / ') : '-'
+}
+
+function normalizeRewriteRows(rows, keys) {
+  if (!Array.isArray(rows)) return []
+  return rows.map((row) => {
+    const next = {}
+    for (const key of keys) {
+      next[key] = Number(row?.[key] || (key === 'range' ? 1 : 0))
+    }
+    return next
+  })
+}
+
+function passAllSlots(maskLike) {
+  const values = Array.isArray(maskLike) ? maskLike : []
+  return values.map((item) => Number(item)).filter((item, index, list) => (item === 1 || item === 2) && list.indexOf(item) === index).sort()
+}
+
+function slotMaskFromArray(values) {
+  let mask = 0
+  for (const value of passAllSlots(values)) {
+    mask |= value
+  }
+  return mask || 0
+}
+
 function makeDeviceDraft(device) {
+  const extra = deviceExtra(device)
   return {
     name: device.name || '',
     callsign: device.callsign || '',
@@ -350,6 +431,23 @@ function makeDeviceDraft(device) {
     nrlServerAddr: device.nrlServerAddr || '',
     nrlServerPort: device.nrlServerPort || '',
     nrlSsid: device.nrlSsid || '',
+    nrlSlot: device.nrlSlot || 1,
+    mmdvmMasterServer: extra.masterServer || (device.ip ? (device.port ? `${device.ip}:${device.port}` : device.ip) : ''),
+    rxFreq: device.rxFreq || '',
+    txFreq: device.txFreq || '',
+    txPower: device.txPower || '',
+    colorCode: device.colorCode || '',
+    latitude: device.latitude || '',
+    longitude: device.longitude || '',
+    height: device.height || '',
+    url: device.url || '',
+    mmdvmSlots: passAllSlots([((Number(device.slots || 3) & 1) ? 1 : 0), ((Number(device.slots || 3) & 2) ? 2 : 0)]),
+    tgRewrites: normalizeRewriteRows(extra.tgRewrites, ['fromSlot', 'fromTG', 'toSlot', 'toTG', 'range']),
+    pcRewrites: normalizeRewriteRows(extra.pcRewrites, ['fromSlot', 'fromId', 'toSlot', 'toId', 'range']),
+    typeRewrites: normalizeRewriteRows(extra.typeRewrites, ['fromSlot', 'fromTG', 'toSlot', 'toId', 'range']),
+    srcRewrites: normalizeRewriteRows(extra.srcRewrites, ['fromSlot', 'fromId', 'toSlot', 'toId', 'range']),
+    passAllTG: passAllSlots(extra.passAllTG),
+    passAllPC: passAllSlots(extra.passAllPC),
     staticSlot1: slotSubscriptions(device.sourceKey, 1).filter((item) => item.kind === 'static').map((item) => item.groupId).join(','),
     staticSlot2: slotSubscriptions(device.sourceKey, 2).filter((item) => item.kind === 'static').map((item) => item.groupId).join(',')
   }
@@ -358,12 +456,16 @@ function makeDeviceDraft(device) {
 function rebuildDeviceDrafts() {
   const activeEditId = deviceEditorOpen.value ? editingDeviceId.value : null
   const currentDrafts = deviceDrafts.value
-  deviceDrafts.value = Object.fromEntries(snapshot.value.devices.map((device) => {
+  const nextDrafts = Object.fromEntries(snapshot.value.devices.map((device) => {
     if (activeEditId === device.id && currentDrafts[device.id]) {
       return [device.id, currentDrafts[device.id]]
     }
     return [device.id, makeDeviceDraft(device)]
   }))
+  if (pendingDevice.value) {
+    nextDrafts[pendingDevice.value.id] = currentDrafts[pendingDevice.value.id] || makeDeviceDraft(pendingDevice.value)
+  }
+  deviceDrafts.value = nextDrafts
 }
 
 async function loadSession() {
@@ -428,8 +530,7 @@ function removeDevice(device) {
   if (device?.sourceKey) delete groups[device.sourceKey]
   snapshot.value = { ...snapshot.value, devices, groups }
   if (editingDeviceId.value === device.id) {
-    editingDeviceId.value = null
-    deviceEditorOpen.value = false
+    closeDeviceEditor()
   }
   rebuildDeviceDrafts()
 }
@@ -726,30 +827,153 @@ async function logout() {
 async function saveDevice(device) {
   const draft = deviceDrafts.value[device.id]
   const hyteraDevice = isHyteraDevice(device)
+  const nrlVirtualDevice = isNRLVirtualDevice(device)
+  const mmdvmUpstreamDevice = isManagedMMDVMDevice(device)
+  const nrlSlot = Number(draft.nrlSlot || 1) === 2 ? 2 : 1
+  const sharedNRLCallsign = normalizeCallsign(draft.callsign || device.callsign || user.value?.callsign || '')
+  const normalizedCallsign = nrlVirtualDevice ? sharedNRLCallsign : normalizeCallsign(draft.callsign)
+  if (mmdvmUpstreamDevice || String(device.id).startsWith('new-mmdvm-')) {
+    const payload = {
+      protocol: 'mmdvm-upstream',
+      name: draft.name,
+      callsign: draft.callsign,
+      dmrid: Number(draft.dmrid || 0),
+      description: draft.description,
+      location: draft.location,
+      notes: draft.notes,
+      devicePassword: draft.devicePassword,
+      mmdvmMasterServer: draft.mmdvmMasterServer,
+      rxFreq: Number(draft.rxFreq || 0),
+      txFreq: Number(draft.txFreq || 0),
+      txPower: Number(draft.txPower || 0),
+      colorCode: Number(draft.colorCode || 0),
+      latitude: Number(draft.latitude || 0),
+      longitude: Number(draft.longitude || 0),
+      height: Number(draft.height || 0),
+      url: draft.url,
+      slots: slotMaskFromArray(draft.mmdvmSlots),
+      tgRewrites: normalizeRewriteRows(draft.tgRewrites, ['fromSlot', 'fromTG', 'toSlot', 'toTG', 'range']),
+      pcRewrites: normalizeRewriteRows(draft.pcRewrites, ['fromSlot', 'fromId', 'toSlot', 'toId', 'range']),
+      typeRewrites: normalizeRewriteRows(draft.typeRewrites, ['fromSlot', 'fromTG', 'toSlot', 'toId', 'range']),
+      srcRewrites: normalizeRewriteRows(draft.srcRewrites, ['fromSlot', 'fromId', 'toSlot', 'toId', 'range']),
+      passAllTG: passAllSlots(draft.passAllTG),
+      passAllPC: passAllSlots(draft.passAllPC)
+    }
+    if (String(device.id).startsWith('new-mmdvm-')) {
+      await api.createDevice(payload)
+      delete deviceDrafts.value[device.id]
+      pendingDevice.value = null
+    } else {
+      await api.updateDevice(device.id, payload)
+    }
+    message.value = t('device.saveSuccess')
+    closeDeviceEditor()
+    await loadSnapshot()
+    return
+  }
+  const staticSlot1 = nrlVirtualDevice ? (nrlSlot === 1 ? primaryGroup(draft.staticSlot1) : []) : parseGroups(draft.staticSlot1)
+  const staticSlot2 = nrlVirtualDevice ? (nrlSlot === 2 ? primaryGroup(draft.staticSlot2) : []) : parseGroups(draft.staticSlot2)
   const payload = {
     name: draft.name,
     notes: draft.notes,
-    model: draft.model,
     description: draft.description,
-    location: draft.location,
-    devicePassword: draft.devicePassword,
-    staticSlot1: parseGroups(draft.staticSlot1),
-    staticSlot2: parseGroups(draft.staticSlot2)
+    staticSlot1,
+    staticSlot2
   }
-  if (hyteraDevice) {
+  if (!nrlVirtualDevice) {
+    payload.model = draft.model
+    payload.location = draft.location
+    payload.devicePassword = draft.devicePassword
+  }
+  if (hyteraDevice || nrlVirtualDevice) {
     payload.nrlServerAddr = draft.nrlServerAddr
     payload.nrlServerPort = Number(draft.nrlServerPort || 0)
     payload.nrlSsid = Number(draft.nrlSsid || 0)
+    payload.nrlSlot = nrlSlot
   }
   if (isAdmin.value) {
-    payload.callsign = draft.callsign
-    payload.dmrid = Number(draft.dmrid || 0)
+    payload.callsign = normalizedCallsign
+    if (!nrlVirtualDevice) {
+      payload.dmrid = Number(draft.dmrid || 0)
+    }
   }
-  await api.updateDevice(device.id, payload)
+  if (nrlVirtualDevice && !normalizedCallsign) {
+    throw new Error(t('device.nrlCallsignRequired'))
+  }
+  if (String(device.id).startsWith('new-nrl-')) {
+    await api.createDevice({
+      name: draft.name,
+      callsign: normalizedCallsign,
+      description: draft.description,
+      notes: draft.notes,
+      nrlServerAddr: draft.nrlServerAddr,
+      nrlServerPort: Number(draft.nrlServerPort || 0),
+      nrlSsid: Number(draft.nrlSsid || 0),
+      nrlSlot,
+      staticGroups: nrlSlot === 1 ? staticSlot1 : staticSlot2
+    })
+    delete deviceDrafts.value[device.id]
+    pendingDevice.value = null
+  } else {
+    await api.updateDevice(device.id, payload)
+  }
   message.value = t('device.saveSuccess')
-  deviceEditorOpen.value = false
-  editingDeviceId.value = null
+  closeDeviceEditor()
   await loadSnapshot()
+}
+
+async function createNRLVirtualDevice() {
+  if (!isAdmin.value) return
+  const device = {
+    id: `new-nrl-${Date.now()}`,
+    protocol: 'nrl-virtual',
+    sourceKey: '',
+    name: '',
+    callsign: user.value?.callsign || '',
+    dmrid: 0,
+    model: '',
+    description: '',
+    location: '',
+    notes: '',
+    devicePassword: '',
+    nrlServerAddr: '',
+    nrlServerPort: 0,
+    nrlSsid: 0,
+    nrlSlot: 1
+  }
+  pendingDevice.value = device
+  deviceDrafts.value[device.id] = makeDeviceDraft(device)
+  openDeviceEditor(device)
+}
+
+async function createMMDVMUpstreamDevice() {
+  if (!isAdmin.value) return
+  const device = {
+    id: `new-mmdvm-${Date.now()}`,
+    protocol: 'mmdvm-upstream',
+    sourceKey: '',
+    name: '',
+    callsign: '',
+    dmrid: 0,
+    model: 'MMDVM Master',
+    description: '',
+    location: '',
+    notes: '',
+    devicePassword: '',
+    rxFreq: 0,
+    txFreq: 0,
+    txPower: 0,
+    colorCode: 1,
+    latitude: 0,
+    longitude: 0,
+    height: 0,
+    url: '',
+    slots: 3,
+    extraJson: ''
+  }
+  pendingDevice.value = device
+  deviceDrafts.value[device.id] = makeDeviceDraft(device)
+  openDeviceEditor(device)
 }
 
 async function deleteDevice(device) {
@@ -757,8 +981,18 @@ async function deleteDevice(device) {
   if (!window.confirm(`${t('app.delete')} ${device.name || device.callsign || device.sourceKey}?`)) return
   await api.deleteDevice(device.id)
   if (editingDeviceId.value === device.id) {
-    editingDeviceId.value = null
-    deviceEditorOpen.value = false
+    closeDeviceEditor()
+  }
+}
+
+async function toggleDeviceEnabled(device) {
+  if (!canEditDevice(device) && !isAdmin.value) return
+  try {
+    message.value = ''
+    await api.updateDevice(device.id, { disabled: !device.disabled })
+    await loadSnapshot()
+  } catch (error) {
+    message.value = error.message || 'Failed to update device'
   }
 }
 
@@ -803,8 +1037,19 @@ function openAuth(mode) {
 }
 
 function openDeviceEditor(device) {
+  pendingDevice.value = String(device?.id || '').startsWith('new-nrl-') ? device : null
+  if (String(device?.id || '').startsWith('new-mmdvm-')) pendingDevice.value = device
   editingDeviceId.value = device.id
   deviceEditorOpen.value = true
+}
+
+function closeDeviceEditor() {
+  if (pendingDevice.value) {
+    delete deviceDrafts.value[pendingDevice.value.id]
+    pendingDevice.value = null
+  }
+  editingDeviceId.value = null
+  deviceEditorOpen.value = false
 }
 
 function openAccountCreator() {
@@ -816,6 +1061,30 @@ function parseGroups(value) {
     .split(/[\s,]+/)
     .map((item) => Number(item.trim()))
     .filter((item, index, list) => Number.isFinite(item) && item > 0 && list.indexOf(item) === index)
+}
+
+function primaryGroup(value) {
+  const groups = parseGroups(value)
+  return groups.length ? groups.slice(0, 1) : []
+}
+
+function newRewriteRow(kind) {
+  if (kind === 'tg') return { fromSlot: 1, fromTG: 0, toSlot: 1, toTG: 0, range: 1 }
+  if (kind === 'pc') return { fromSlot: 1, fromId: 0, toSlot: 1, toId: 0, range: 1 }
+  if (kind === 'type') return { fromSlot: 1, fromTG: 0, toSlot: 1, toId: 0, range: 1 }
+  return { fromSlot: 1, fromId: 0, toSlot: 1, toId: 0, range: 1 }
+}
+
+function addRewriteRule(deviceId, key, kind) {
+  const draft = deviceDrafts.value[deviceId]
+  if (!draft) return
+  draft[key].push(newRewriteRow(kind))
+}
+
+function removeRewriteRule(deviceId, key, index) {
+  const draft = deviceDrafts.value[deviceId]
+  if (!draft) return
+  draft[key].splice(index, 1)
 }
 
 onMounted(async () => {
@@ -1024,30 +1293,40 @@ onUnmounted(() => {
         <template v-else-if="activePanel === 'devices'">
           <div class="section-head">
             <h2>{{ t('app.devices') }}</h2>
-            <input v-model="deviceSearch" class="search-input" :placeholder="t('device.searchPlaceholder')" />
+            <div class="section-head-side">
+              <div class="section-search-wrap">
+                <input v-model="deviceSearch" class="search-input" :placeholder="t('device.searchPlaceholder')" />
+              </div>
+              <div v-if="isAdmin" class="section-action-group">
+                <button class="primary" @click="createNRLVirtualDevice">{{ t('device.createNrlVirtual') }}</button>
+                <button class="ghost" @click="createMMDVMUpstreamDevice">{{ t('device.createMmdvmClient') }}</button>
+              </div>
+            </div>
           </div>
           <div class="device-card-list device-list-grid">
-            <article v-for="device in filteredDevices" :key="device.id" class="glass inset device-list-card">
+            <article v-for="device in filteredDevices" :key="device.id" :class="['glass', 'inset', 'device-list-card', deviceToneClass(device), { 'device-card-disabled': device.disabled }]">
               <div class="device-mobile-head device-list-head">
                 <div>
                   <strong>{{ device.name || device.sourceKey }}</strong>
-                  <p class="muted-inline">{{ device.callsign || '-' }} · {{ device.dmrid || '-' }} · {{ device.protocol || '-' }}</p>
+                  <p class="muted-inline">
+                    {{ device.callsign || '-' }} · {{ isNRLVirtualDevice(device) ? (device.protocol || '-') : `${device.dmrid || '-'} · ${device.protocol || '-'}` }}
+                  </p>
                 </div>
                 <div class="device-head-side">
-                  <span :class="['table-status', { online: device.online }]">{{ device.online ? t('call.online') : t('call.offline') }}</span>
+                  <span :class="['table-status', { online: device.online && !device.disabled, disabled: device.disabled }]">{{ deviceStatusLabel(device) }}</span>
                   <div v-if="canEditDevice(device) || isAdmin" class="account-actions device-actions-inline">
                     <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
+                    <button v-if="canEditDevice(device) || isAdmin" class="ghost" @click="toggleDeviceEnabled(device)">{{ device.disabled ? t('app.enable') : t('app.disable') }}</button>
                     <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
                   </div>
                 </div>
               </div>
               <div class="device-info-grid">
-                <div class="kv-row"><span>TS1 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'static') }}</strong></div>
-                <div class="kv-row"><span>TS1 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'dynamic') }}</strong></div>
-                <div class="kv-row"><span>TS2 {{ t('device.staticGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'static') }}</strong></div>
-                <div class="kv-row"><span>TS2 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'dynamic') }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
+                <div v-for="row in deviceStaticGroupRows(device)" :key="`static-${device.id}-${row.slot}`" class="kv-row"><span>TS{{ row.slot }} {{ t('device.staticGroups') }}</span><strong>{{ row.value }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>TS1 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 1, 'dynamic') }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>TS2 {{ t('device.dynamicGroups') }}</span><strong>{{ groupSummary(device.sourceKey, 2, 'dynamic') }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
                 <div class="kv-row"><span>{{ t('device.notes') }}</span><strong>{{ device.notes || '-' }}</strong></div>
               </div>
               <div class="device-card-footer">
@@ -1055,6 +1334,7 @@ onUnmounted(() => {
               </div>
               <div v-if="canEditDevice(device) || isAdmin" class="account-actions device-actions-bottom">
                 <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
+                <button v-if="canEditDevice(device) || isAdmin" class="ghost" @click="toggleDeviceEnabled(device)">{{ device.disabled ? t('app.enable') : t('app.disable') }}</button>
                 <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
               </div>
             </article>
@@ -1071,27 +1351,31 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="my-device-list">
-            <article v-for="device in filteredMyDevices" :key="device.id" class="glass inset my-device-card">
+            <article v-for="device in filteredMyDevices" :key="device.id" :class="['glass', 'inset', 'my-device-card', deviceToneClass(device), { 'device-card-disabled': device.disabled }]">
               <div class="my-device-head">
                 <div>
                   <strong>{{ device.name || device.sourceKey }}</strong>
-                  <p class="muted-inline">{{ device.callsign || '-' }} · {{ device.protocol || '-' }}</p>
+                  <p class="muted-inline">
+                    {{ device.callsign || '-' }} · {{ isNRLVirtualDevice(device) ? (device.protocol || '-') : `${device.dmrid || '-'} · ${device.protocol || '-'}` }}
+                  </p>
                 </div>
-                <span :class="['table-status', { online: device.online }]">{{ device.online ? t('call.online') : t('call.offline') }}</span>
+                <span :class="['table-status', { online: device.online && !device.disabled, disabled: device.disabled }]">{{ deviceStatusLabel(device) }}</span>
               </div>
               <div class="kv-list compact">
                 <div class="kv-row"><span>{{ t('device.callsign') }}</span><strong>{{ device.callsign || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.dmrid') }}</span><strong>{{ device.dmrid || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
-                <div class="kv-row"><span>{{ t('device.password') }}</span><strong>{{ device.devicePassword || '-' }}</strong></div>
-                <div v-if="isHyteraDevice(device)" class="kv-row"><span>{{ t('device.nrlServerAddr') }}</span><strong>{{ device.nrlServerAddr || '-' }}</strong></div>
-                <div v-if="isHyteraDevice(device)" class="kv-row"><span>{{ t('device.nrlServerPort') }}</span><strong>{{ device.nrlServerPort || '-' }}</strong></div>
-                <div v-if="isHyteraDevice(device)" class="kv-row"><span>{{ t('device.nrlSsid') }}</span><strong>{{ device.nrlSsid || '-' }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.dmrid') }}</span><strong>{{ device.dmrid || '-' }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.model') }}</span><strong>{{ device.model || '-' }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.location') }}</span><strong>{{ device.location || '-' }}</strong></div>
+                <div v-if="!isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.password') }}</span><strong>{{ device.devicePassword || '-' }}</strong></div>
+                <div v-if="isHyteraDevice(device) || isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.nrlServerAddr') }}</span><strong>{{ device.nrlServerAddr || '-' }}</strong></div>
+                <div v-if="isHyteraDevice(device) || isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.nrlServerPort') }}</span><strong>{{ device.nrlServerPort || '-' }}</strong></div>
+                <div v-if="isHyteraDevice(device) || isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.nrlSsid') }}</span><strong>{{ device.nrlSsid || '-' }}</strong></div>
+                <div v-if="isNRLVirtualDevice(device)" class="kv-row"><span>{{ t('device.nrlSlot') }}</span><strong>{{ device.nrlSlot || 1 }}</strong></div>
                 <div class="kv-row"><span>{{ t('device.notes') }}</span><strong>{{ device.notes || '-' }}</strong></div>
               </div>
               <div class="account-actions">
                 <button v-if="canEditDevice(device)" class="primary" @click="openDeviceEditor(device)">{{ t('app.edit') }}</button>
+                <button v-if="canEditDevice(device) || isAdmin" class="ghost" @click="toggleDeviceEnabled(device)">{{ device.disabled ? t('app.enable') : t('app.disable') }}</button>
                 <button v-if="isAdmin" class="ghost danger" @click="deleteDevice(device)">{{ t('app.delete') }}</button>
               </div>
             </article>
@@ -1177,8 +1461,8 @@ onUnmounted(() => {
     <div v-if="deviceEditorOpen && editingDevice" class="modal-backdrop">
       <section class="auth-modal glass device-editor-modal">
         <div class="section-head">
-          <h2>{{ t('app.edit') }} · {{ editingDevice.name || editingDevice.callsign || editingDevice.sourceKey }}</h2>
-          <button class="ghost" @click="deviceEditorOpen = false">{{ t('app.close') }}</button>
+          <h2>{{ String(editingDevice.id).startsWith('new-nrl-') ? `${t('app.create')} · ${t('device.createNrlVirtual')}` : String(editingDevice.id).startsWith('new-mmdvm-') ? `${t('app.create')} · ${t('device.createMmdvmClient')}` : `${t('app.edit')} · ${editingDevice.name || editingDevice.callsign || editingDevice.sourceKey}` }}</h2>
+          <button class="ghost" @click="closeDeviceEditor()">{{ t('app.close') }}</button>
         </div>
         <form class="form-grid device-editor-form" @submit.prevent="saveDevice(editingDevice)">
           <div class="device-editor-grid">
@@ -1191,7 +1475,7 @@ onUnmounted(() => {
                   <span>{{ t('device.name') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].name" :placeholder="t('device.name')" />
                 </label>
-                <label class="field-block">
+                <label v-if="!isNRLVirtualDevice(editingDevice) && !isManagedMMDVMDevice(editingDevice)" class="field-block">
                   <span>{{ t('device.model') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].model" :placeholder="t('device.model')" />
                 </label>
@@ -1199,38 +1483,38 @@ onUnmounted(() => {
                   <span>{{ t('device.callsign') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].callsign" :placeholder="t('device.callsign')" />
                 </label>
-                <label v-if="isAdmin" class="field-block">
+                <label v-if="isAdmin && !isNRLVirtualDevice(editingDevice)" class="field-block">
                   <span>{{ t('device.dmrid') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].dmrid" :placeholder="t('device.dmrid')" />
                 </label>
-                <label class="field-block">
+                <label v-if="!isNRLVirtualDevice(editingDevice)" class="field-block">
                   <span>{{ t('device.location') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].location" :placeholder="t('device.location')" />
                 </label>
-                <label class="field-block">
+                <label v-if="!isNRLVirtualDevice(editingDevice)" class="field-block">
                   <span>{{ t('device.password') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].devicePassword" :placeholder="t('device.password')" />
                 </label>
               </div>
             </section>
 
-            <section class="device-editor-section field-span-2">
+            <section v-if="!isManagedMMDVMDevice(editingDevice)" class="device-editor-section field-span-2">
               <div class="device-editor-section-head">
                 <h3>{{ t('device.staticGroups') }}</h3>
               </div>
               <div class="device-editor-section-grid">
                 <label class="field-block">
                   <span>{{ t('device.ts1') }}</span>
-                  <input v-model="deviceDrafts[editingDevice.id].staticSlot1" :placeholder="t('device.ts1')" />
+                  <input v-model="deviceDrafts[editingDevice.id].staticSlot1" :disabled="isNRLVirtualDevice(editingDevice) && Number(deviceDrafts[editingDevice.id].nrlSlot || 1) !== 1" :placeholder="t('device.ts1')" />
                 </label>
                 <label class="field-block">
                   <span>{{ t('device.ts2') }}</span>
-                  <input v-model="deviceDrafts[editingDevice.id].staticSlot2" :placeholder="t('device.ts2')" />
+                  <input v-model="deviceDrafts[editingDevice.id].staticSlot2" :disabled="isNRLVirtualDevice(editingDevice) && Number(deviceDrafts[editingDevice.id].nrlSlot || 1) !== 2" :placeholder="t('device.ts2')" />
                 </label>
               </div>
             </section>
 
-            <section v-if="isHyteraDevice(editingDevice)" class="device-editor-section field-span-2 device-editor-section-nrl">
+            <section v-if="isHyteraDevice(editingDevice) || isNRLVirtualDevice(editingDevice)" class="device-editor-section field-span-2 device-editor-section-nrl">
               <div class="device-editor-section-head">
                 <h3>NRL</h3>
               </div>
@@ -1247,6 +1531,174 @@ onUnmounted(() => {
                   <span>{{ t('device.nrlSsid') }}</span>
                   <input v-model="deviceDrafts[editingDevice.id].nrlSsid" :placeholder="t('device.nrlSsid')" />
                 </label>
+                <fieldset v-if="isNRLVirtualDevice(editingDevice)" class="field-block slot-radio-group">
+                  <span>{{ t('device.nrlSlot') }}</span>
+                  <div class="slot-radio-options">
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].nrlSlot" type="radio" :value="1" />
+                      <span>TS1</span>
+                    </label>
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].nrlSlot" type="radio" :value="2" />
+                      <span>TS2</span>
+                    </label>
+                  </div>
+                </fieldset>
+              </div>
+            </section>
+
+            <section v-if="isManagedMMDVMDevice(editingDevice)" class="device-editor-section field-span-2 device-editor-section-nrl">
+              <div class="device-editor-section-head">
+                <h3>MMDVM</h3>
+              </div>
+              <div class="device-editor-section-grid">
+                <label class="field-block">
+                  <span>{{ t('device.masterServer') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].mmdvmMasterServer" :placeholder="t('device.masterServer')" />
+                </label>
+                <fieldset class="field-block slot-radio-group">
+                  <span>{{ t('device.slotsLabel') }}</span>
+                  <div class="slot-radio-options">
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].mmdvmSlots" type="checkbox" :value="1" />
+                      <span>TS1</span>
+                    </label>
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].mmdvmSlots" type="checkbox" :value="2" />
+                      <span>TS2</span>
+                    </label>
+                  </div>
+                </fieldset>
+                <label class="field-block">
+                  <span>{{ t('device.rxFreq') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].rxFreq" :placeholder="t('device.rxFreq')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.txFreq') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].txFreq" :placeholder="t('device.txFreq')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.txPower') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].txPower" :placeholder="t('device.txPower')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.colorCode') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].colorCode" :placeholder="t('device.colorCode')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.latitude') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].latitude" :placeholder="t('device.latitude')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.longitude') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].longitude" :placeholder="t('device.longitude')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.height') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].height" :placeholder="t('device.height')" />
+                </label>
+                <label class="field-block">
+                  <span>{{ t('device.url') }}</span>
+                  <input v-model="deviceDrafts[editingDevice.id].url" :placeholder="t('device.url')" />
+                </label>
+              </div>
+            </section>
+
+            <section v-if="isManagedMMDVMDevice(editingDevice)" class="device-editor-section field-span-2">
+              <div class="device-editor-section-head">
+                <h3>{{ t('device.rewriteRules') }}</h3>
+              </div>
+              <div class="rewrite-groups">
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.tgRewrite') }}</strong>
+                    <button type="button" class="ghost" @click="addRewriteRule(editingDevice.id, 'tgRewrites', 'tg')">{{ t('device.addRule') }}</button>
+                  </div>
+                  <div v-if="!deviceDrafts[editingDevice.id].tgRewrites.length" class="hint">{{ t('device.noRules') }}</div>
+                  <div v-for="(rule, index) in deviceDrafts[editingDevice.id].tgRewrites" :key="`tg-${index}`" class="rewrite-row">
+                    <input v-model="rule.fromSlot" :placeholder="t('device.fromSlot')" />
+                    <input v-model="rule.fromTG" :placeholder="t('device.fromTG')" />
+                    <input v-model="rule.toSlot" :placeholder="t('device.toSlot')" />
+                    <input v-model="rule.toTG" :placeholder="t('device.toTG')" />
+                    <input v-model="rule.range" :placeholder="t('device.range')" />
+                    <button type="button" class="ghost danger" @click="removeRewriteRule(editingDevice.id, 'tgRewrites', index)">{{ t('app.delete') }}</button>
+                  </div>
+                </div>
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.pcRewrite') }}</strong>
+                    <button type="button" class="ghost" @click="addRewriteRule(editingDevice.id, 'pcRewrites', 'pc')">{{ t('device.addRule') }}</button>
+                  </div>
+                  <div v-if="!deviceDrafts[editingDevice.id].pcRewrites.length" class="hint">{{ t('device.noRules') }}</div>
+                  <div v-for="(rule, index) in deviceDrafts[editingDevice.id].pcRewrites" :key="`pc-${index}`" class="rewrite-row">
+                    <input v-model="rule.fromSlot" :placeholder="t('device.fromSlot')" />
+                    <input v-model="rule.fromId" :placeholder="t('device.fromId')" />
+                    <input v-model="rule.toSlot" :placeholder="t('device.toSlot')" />
+                    <input v-model="rule.toId" :placeholder="t('device.toId')" />
+                    <input v-model="rule.range" :placeholder="t('device.range')" />
+                    <button type="button" class="ghost danger" @click="removeRewriteRule(editingDevice.id, 'pcRewrites', index)">{{ t('app.delete') }}</button>
+                  </div>
+                </div>
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.typeRewrite') }}</strong>
+                    <button type="button" class="ghost" @click="addRewriteRule(editingDevice.id, 'typeRewrites', 'type')">{{ t('device.addRule') }}</button>
+                  </div>
+                  <div v-if="!deviceDrafts[editingDevice.id].typeRewrites.length" class="hint">{{ t('device.noRules') }}</div>
+                  <div v-for="(rule, index) in deviceDrafts[editingDevice.id].typeRewrites" :key="`type-${index}`" class="rewrite-row">
+                    <input v-model="rule.fromSlot" :placeholder="t('device.fromSlot')" />
+                    <input v-model="rule.fromTG" :placeholder="t('device.fromTG')" />
+                    <input v-model="rule.toSlot" :placeholder="t('device.toSlot')" />
+                    <input v-model="rule.toId" :placeholder="t('device.toId')" />
+                    <input v-model="rule.range" :placeholder="t('device.range')" />
+                    <button type="button" class="ghost danger" @click="removeRewriteRule(editingDevice.id, 'typeRewrites', index)">{{ t('app.delete') }}</button>
+                  </div>
+                </div>
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.srcRewrite') }}</strong>
+                    <button type="button" class="ghost" @click="addRewriteRule(editingDevice.id, 'srcRewrites', 'src')">{{ t('device.addRule') }}</button>
+                  </div>
+                  <div v-if="!deviceDrafts[editingDevice.id].srcRewrites.length" class="hint">{{ t('device.noRules') }}</div>
+                  <div v-for="(rule, index) in deviceDrafts[editingDevice.id].srcRewrites" :key="`src-${index}`" class="rewrite-row">
+                    <input v-model="rule.fromSlot" :placeholder="t('device.fromSlot')" />
+                    <input v-model="rule.fromId" :placeholder="t('device.fromId')" />
+                    <input v-model="rule.toSlot" :placeholder="t('device.toSlot')" />
+                    <input v-model="rule.toId" :placeholder="t('device.toId')" />
+                    <input v-model="rule.range" :placeholder="t('device.range')" />
+                    <button type="button" class="ghost danger" @click="removeRewriteRule(editingDevice.id, 'srcRewrites', index)">{{ t('app.delete') }}</button>
+                  </div>
+                </div>
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.passAllTG') }}</strong>
+                  </div>
+                  <div class="slot-radio-options">
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].passAllTG" type="checkbox" :value="1" />
+                      <span>TS1</span>
+                    </label>
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].passAllTG" type="checkbox" :value="2" />
+                      <span>TS2</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="rewrite-group">
+                  <div class="rewrite-group-head">
+                    <strong>{{ t('device.passAllPC') }}</strong>
+                  </div>
+                  <div class="slot-radio-options">
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].passAllPC" type="checkbox" :value="1" />
+                      <span>TS1</span>
+                    </label>
+                    <label class="slot-radio-option">
+                      <input v-model="deviceDrafts[editingDevice.id].passAllPC" type="checkbox" :value="2" />
+                      <span>TS2</span>
+                    </label>
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -1263,7 +1715,7 @@ onUnmounted(() => {
             </section>
           </div>
           <div class="device-editor-actions">
-            <button type="button" class="ghost" @click="deviceEditorOpen = false">{{ t('app.close') }}</button>
+            <button type="button" class="ghost" @click="closeDeviceEditor()">{{ t('app.close') }}</button>
             <button type="submit" class="primary">{{ t('app.save') }}</button>
           </div>
         </form>

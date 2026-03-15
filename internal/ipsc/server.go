@@ -38,6 +38,7 @@ type IPSCServer struct {
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
 	stopOnce sync.Once
+	done     chan struct{}
 }
 
 type Packet struct {
@@ -107,6 +108,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		peers:     map[uint32]*Peer{},
 		lastSend:  map[uint32]time.Time{},
 		peerLocks: map[string]*sync.Mutex{},
+		done:      make(chan struct{}),
 	}
 }
 
@@ -133,6 +135,7 @@ func (s *IPSCServer) Stop() {
 	s.stopOnce.Do(func() {
 		slog.Info("Stopping IPSC server")
 		s.stopped.Store(true)
+		close(s.done)
 		if s.udp != nil {
 			if err := s.udp.Close(); err != nil {
 				slog.Error("error closing UDP listener", "error", err)
@@ -427,11 +430,16 @@ func (s *IPSCServer) peerExpiryLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if s.stopped.Load() {
+	for {
+		select {
+		case <-s.done:
 			return
+		case <-ticker.C:
+			if s.stopped.Load() {
+				return
+			}
+			s.expireStalePeers()
 		}
-		s.expireStalePeers()
 	}
 }
 

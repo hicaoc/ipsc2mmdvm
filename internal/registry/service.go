@@ -196,7 +196,7 @@ func (s *Service) RecordCall(call CallRecord, ended bool) (CallRecord, bool, err
 		s.mu.Unlock()
 		return CallRecord{}, false, nil
 	}
-	if fallbackKey, active, ok := s.findMatchingActiveCallLocked(call); ok {
+	if fallbackKey, active, ok := s.findMatchingActiveCallLocked(call, ended); ok {
 		if ended {
 			s.mu.Unlock()
 			updated, err := s.finishActiveCall(fallbackKey, active, now)
@@ -440,7 +440,7 @@ func (s *Service) finishActiveCall(key string, active activeCallState, endedAt t
 	return updated, nil
 }
 
-func (s *Service) findMatchingActiveCallLocked(call CallRecord) (string, activeCallState, bool) {
+func (s *Service) findMatchingActiveCallLocked(call CallRecord, ended bool) (string, activeCallState, bool) {
 	for key, active := range s.activeCall {
 		if active.Frontend != call.Frontend {
 			continue
@@ -460,9 +460,31 @@ func (s *Service) findMatchingActiveCallLocked(call CallRecord) (string, activeC
 		if active.CallType != call.CallType {
 			continue
 		}
+		// For non-terminator packets, require dst/src consistency so different TG/PC
+		// conversations are not collapsed into one endless active record.
+		if !ended {
+			if call.DstID != 0 {
+				existing, ok := s.recentCallByIDLocked(active.ID)
+				if !ok || existing.DstID != call.DstID {
+					continue
+				}
+				if call.SrcID != 0 && existing.SrcID != 0 && existing.SrcID != call.SrcID {
+					continue
+				}
+			}
+		}
 		return key, active, true
 	}
 	return "", activeCallState{}, false
+}
+
+func (s *Service) recentCallByIDLocked(id int64) (CallRecord, bool) {
+	for i := range s.recent {
+		if s.recent[i].ID == id {
+			return s.recent[i], true
+		}
+	}
+	return CallRecord{}, false
 }
 
 func (s *Service) publish(event Event) {

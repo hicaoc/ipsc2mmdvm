@@ -25,6 +25,7 @@ export const api = {
   snapshot: () => request('/api/snapshot'),
   listUsers: () => request('/api/users'),
   createUser: (payload) => request('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
+  createDevice: (payload) => request('/api/devices', { method: 'POST', body: JSON.stringify(payload) }),
   updateUser: (id, payload) => request(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteUser: (id) => request(`/api/users/${id}`, { method: 'DELETE' }),
   resetUserPassword: (id, password) => request(`/api/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),

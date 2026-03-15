@@ -118,6 +118,7 @@ type Server struct {
 	stopped  atomic.Bool
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+	done     chan struct{}
 
 	mu               sync.RWMutex
 	repeaterP2PAddr  map[string]*net.UDPAddr // 记录中继 P2P NAT 地址（从 0x10 注册包和 ping 获取）
@@ -147,6 +148,7 @@ func NewServer(cfg *config.Config, m *metrics.Metrics) *Server {
 	return &Server{
 		cfg:              cfg,
 		metrics:          m,
+		done:             make(chan struct{}),
 		nextStreamID:     1,
 		repeaterP2PAddr:  map[string]*net.UDPAddr{},
 		repeaterDMRAddr:  map[string]*net.UDPAddr{},
@@ -247,6 +249,7 @@ func (s *Server) Start() error {
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		s.stopped.Store(true)
+		close(s.done)
 		if s.nrlBridge != nil {
 			s.nrlBridge.Stop()
 		}
@@ -269,11 +272,16 @@ func (s *Server) peerExpiryLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if s.stopped.Load() {
+	for {
+		select {
+		case <-s.done:
 			return
+		case <-ticker.C:
+			if s.stopped.Load() {
+				return
+			}
+			s.expireStalePeers()
 		}
-		s.expireStalePeers()
 	}
 }
 

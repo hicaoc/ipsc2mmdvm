@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hicaoc/ipsc2mmdvm/internal/config"
+	nrlcodec "github.com/hicaoc/ipsc2mmdvm/internal/nrl"
 )
 
 const (
@@ -585,7 +586,7 @@ func (s *nrlSession) emitAudioChunk(frontend, streamID string, sourceDMRID uint3
 func ulawSamplesToPCM16(in []byte) []int16 {
 	pcm := make([]int16, 0, len(in))
 	for _, sample := range in {
-		pcm = append(pcm, int16(ulaw2linear(sample)))
+		pcm = append(pcm, nrlcodec.UlawToLinear(sample))
 	}
 	return pcm
 }
@@ -593,7 +594,7 @@ func ulawSamplesToPCM16(in []byte) []int16 {
 func alawSamplesToPCM16(in []byte) []int16 {
 	pcm := make([]int16, 0, len(in))
 	for _, sample := range in {
-		pcm = append(pcm, int16(alaw2linear(sample)))
+		pcm = append(pcm, nrlcodec.AlawToLinear(sample))
 	}
 	return pcm
 }
@@ -706,7 +707,7 @@ func normalizeNRLCallsign(callsign string) string {
 func ulawChunkToAlaw(in []byte) []byte {
 	out := make([]byte, len(in))
 	for i := range in {
-		out[i] = Linear2Alaw(ulaw2linear(in[i]) * 3)
+		out[i] = nrlcodec.LinearToAlaw(nrlcodec.UlawToLinear(in[i]) * 3)
 	}
 	return out
 }
@@ -714,7 +715,7 @@ func ulawChunkToAlaw(in []byte) []byte {
 func alawChunkToUlaw(in []byte) []byte {
 	out := make([]byte, len(in))
 	for i := range in {
-		out[i] = Linear2Ulaw(alaw2linear(in[i]))
+		out[i] = nrlcodec.LinearToUlaw(nrlcodec.AlawToLinear(in[i]))
 	}
 	return out
 }

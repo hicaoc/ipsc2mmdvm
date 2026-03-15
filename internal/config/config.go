@@ -87,9 +87,12 @@ type IPSCAuth struct {
 }
 
 type MMDVM struct {
-	Name     string `name:"name" description:"Name for this MMDVM network (used in logging)"`
-	Callsign string `name:"callsign" description:"Callsign to use for the MMDVM connection"`
-	ID       uint32 `name:"radio-id" description:"Radio ID for the MMDVM connection"`
+	// SourceKey is a stable runtime identity for DB-managed networks.
+	// It is not read from config files.
+	SourceKey string `json:"-"`
+	Name      string `name:"name" description:"Name for this MMDVM network (used in logging)"`
+	Callsign  string `name:"callsign" description:"Callsign to use for the MMDVM connection"`
+	ID        uint32 `name:"radio-id" description:"Radio ID for the MMDVM connection"`
 	// RXFreq is in Hz
 	RXFreq uint `name:"rx-freq" description:"Receive frequency in Hz for the MMDVM connection"`
 	// TXFreq is in Hz
@@ -378,4 +381,10 @@ func validateRewrites(h *MMDVM) error {
 		}
 	}
 	return nil
+}
+
+func ValidateMMDVMClients(networks []MMDVM) error {
+	names := make(map[string]struct{}, len(networks))
+	listeners := map[string]struct{}{}
+	return validateMMDVMNetworks(networks, true, true, names, listeners)
 }

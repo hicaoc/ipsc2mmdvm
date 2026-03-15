@@ -8,6 +8,7 @@ const (
 	CategoryMMDVM  DeviceCategory = "mmdvm"
 	CategoryMoto   DeviceCategory = "moto"
 	CategoryHytera DeviceCategory = "hytera"
+	CategoryNRL    DeviceCategory = "nrl"
 )
 
 type Device struct {
@@ -45,6 +46,7 @@ type Device struct {
 	NRLServerPort  int            `json:"nrlServerPort"`
 	NRLSSID        uint8          `json:"nrlSsid"`
 	NRLUDPPort     int            `json:"nrlUdpPort"`
+	NRLSlot        int            `json:"nrlSlot"`
 	Disabled       bool           `json:"disabled"`
 	ExtraJSON      string         `json:"extraJson"`
 }

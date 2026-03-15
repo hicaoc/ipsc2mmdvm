@@ -142,7 +142,7 @@ func (h *MMDVMClient) publishStatus(status string, online bool) {
 		return
 	}
 	h.statusHandler(ClientStatus{
-		SourceKey:   "mmdvm-upstream:" + h.cfg.Name,
+		SourceKey:   SourceKey(h.cfg),
 		Name:        h.cfg.Name,
 		Callsign:    h.cfg.Callsign,
 		DMRID:       h.cfg.ID,

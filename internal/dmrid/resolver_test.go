@@ -47,3 +47,33 @@ func TestLoadSemicolonFormat(t *testing.T) {
 		t.Fatalf("expected VE3IAO, got %q", got)
 	}
 }
+
+func TestLookupIDAndNormalizeCallsign(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dmrid.csv")
+	content := "1023092,VE3FIS,Tom,,Toronto,Ontario,Canada\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	resolver, err := Load(path)
+	if err != nil {
+		t.Fatalf("load resolver: %v", err)
+	}
+
+	if got := resolver.LookupID("ve3fis"); got != 1023092 {
+		t.Fatalf("expected 1023092, got %d", got)
+	}
+	if got := NormalizeCallsign(" ve3fis "); got != "VE3FIS" {
+		t.Fatalf("expected VE3FIS, got %q", got)
+	}
+}
+
+func TestIsValidCallsign(t *testing.T) {
+	if !IsValidCallsign("VE3FIS") {
+		t.Fatal("expected VE3FIS to be valid")
+	}
+	if IsValidCallsign("INVALID") {
+		t.Fatal("expected INVALID to be rejected")
+	}
+}
