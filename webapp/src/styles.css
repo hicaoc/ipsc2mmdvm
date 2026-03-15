@@ -449,8 +449,7 @@ select:focus {
 .account-card,
 .my-device-card,
 .call-card {
-  content-visibility: auto;
-  contain-intrinsic-size: 320px;
+  min-width: 0;
 }
 
 .device-mobile-head {
